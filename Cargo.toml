@@ -3,7 +3,7 @@ name = "tls-tester"
 description = "A TLS 1.3 server for testing client implementations"
 version = "0.1.0"
 edition = "2024"
-license = "MIT or Apache-2.0"
+license = "MIT OR Apache-2.0"
 authors = ["Alex Martens <alex@thinglab.org>"]
 repository = "https://github.com/newAM/tls-tester"
 
