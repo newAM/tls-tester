@@ -1,4 +1,4 @@
-use crate::{AlertDescription, parse};
+use crate::{alert::AlertDescription, parse};
 
 /// # References
 ///
@@ -64,7 +64,16 @@ impl TryFrom<u16> for NamedGroup {
     }
 }
 
-pub fn deser_named_group_list(b: &[u8]) -> Result<Vec<NamedGroup>, AlertDescription> {
+/// # References
+///
+/// - [RFC 8446 Appendix B.3.1.4](https://datatracker.ietf.org/doc/html/rfc8446#appendix-B.3.1.4)
+///
+/// ```text
+/// struct {
+///     NamedGroup named_group_list<2..2^16-1>;
+/// } NamedGroupList;
+/// ```
+pub(crate) fn deser_named_group_list(b: &[u8]) -> Result<Vec<NamedGroup>, AlertDescription> {
     let (_, named_group_list): (_, &[u8]) =
         parse::vec16("NamedGroupList named_group_list", b, 2, 2)?;
 
@@ -82,4 +91,13 @@ pub fn deser_named_group_list(b: &[u8]) -> Result<Vec<NamedGroup>, AlertDescript
     }
 
     Ok(ret)
+}
+
+pub(crate) fn ser_named_group_list() -> Vec<u8> {
+    let mut ret: Vec<u8> = Vec::new();
+
+    ret.extend_from_slice(2_u16.to_be_bytes().as_ref());
+    ret.extend_from_slice(NamedGroup::secp256r1.to_be_bytes().as_ref());
+
+    ret
 }

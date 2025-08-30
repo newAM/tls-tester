@@ -1,10 +1,10 @@
 use super::{
     NamedGroup,
-    extension::{KeyShareServerHello, PskServerHello, ServerHelloExtension},
+    extension::{KeyShareServerHello, PskServerHello, ServerHelloExtension, ServerHelloExtensions},
 };
 use rand::{RngCore, rngs::OsRng};
 
-use crate::{CipherSuite, TlsVersion};
+use crate::{AlertDescription, cipher_suite::CipherSuite, parse, tls_version::TlsVersion};
 
 // https://datatracker.ietf.org/doc/html/rfc8446#section-4.1.3
 // For reasons of backward compatibility with middleboxes (see
@@ -33,13 +33,13 @@ const SERVER_HELLO_RETRY_RANDOM: [u8; 32] = [
 /// } ServerHello;
 /// ```
 #[derive(Debug)]
-pub struct ServerHello {
+pub struct ServerHelloBuilder {
     random: [u8; 32],
     legacy_session_id_echo: Vec<u8>,
     extensions: Vec<ServerHelloExtension>,
 }
 
-impl ServerHello {
+impl ServerHelloBuilder {
     pub fn new(
         legacy_session_id_echo: &[u8],
         key: &[u8; 65],
@@ -62,7 +62,7 @@ impl ServerHello {
             KeyShareServerHello::new_secp256r1(key),
         ));
 
-        ServerHello {
+        Self {
             random,
             legacy_session_id_echo: legacy_session_id_echo.to_vec(),
             extensions,
@@ -84,7 +84,7 @@ impl ServerHello {
             NamedGroup::secp256r1,
         ));
 
-        ServerHello {
+        Self {
             random: SERVER_HELLO_RETRY_RANDOM,
             legacy_session_id_echo: legacy_session_id_echo.to_vec(),
             extensions,
@@ -134,5 +134,84 @@ impl ServerHello {
             .copy_from_slice(&extensions_len.to_be_bytes());
 
         buf
+    }
+}
+
+/// Server Hello key exchange message.
+///
+/// # References
+///
+/// * [RFC 8446 Appendix B.3.1](https://datatracker.ietf.org/doc/html/rfc8446#appendix-B.3.1)
+///
+/// ```text
+/// struct {
+///     ProtocolVersion legacy_version = 0x0303;    /* TLS v1.2 */
+///     Random random;
+///     opaque legacy_session_id_echo<0..32>;
+///     CipherSuite cipher_suite;
+///     uint8 legacy_compression_method = 0;
+///     Extension extensions<6..2^16-1>;
+/// } ServerHello;
+/// ```
+#[derive(Debug)]
+pub struct ServerHello {
+    pub random: [u8; 32],
+    pub legacy_session_id_echo: Vec<u8>,
+    pub cipher_suite: CipherSuite,
+    pub exts: ServerHelloExtensions,
+}
+
+impl ServerHello {
+    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
+        let (b, legacy_version) = parse::u16("ServerHello legacy_version", b)?;
+
+        if legacy_version != 0x0303 {
+            log::error!(
+                "ServerHello legacy_version 0x{legacy_version:04X} is not the required value of 0x0303"
+            );
+            return Err(AlertDescription::IllegalParameter);
+        }
+
+        let (b, random): (&[u8], [u8; 32]) = parse::fixed("ServerHello random", b)?;
+
+        let (b, legacy_session_id_echo) =
+            parse::vec8("ServerHello legacy_session_id_echo", b, 0, 1)?;
+
+        let legacy_session_id_echo: Vec<u8> = legacy_session_id_echo.to_vec();
+
+        if legacy_session_id_echo.len() > 32 {
+            log::error!("ServerHello legacy_session_id_echo length is greater than maximum of 32");
+            return Err(AlertDescription::DecodeError);
+        }
+
+        let (b, cipher_suite) = parse::u16("ServerHello cipher_suite", b)?;
+
+        let cipher_suite: CipherSuite = match CipherSuite::try_from(cipher_suite) {
+            Ok(cs) => cs,
+            Err(v) => {
+                log::error!("ServerHello cipher_suite contains unknown value 0x{v:04X}");
+                return Err(AlertDescription::IllegalParameter);
+            }
+        };
+
+        let (b, legacy_compression_method) = parse::u8("ServerHello legacy_compression_method", b)?;
+
+        if legacy_compression_method != 0 {
+            log::error!(
+                "ServerHello legacy_compression_method 0x{legacy_compression_method:02X} is not the required value of 0"
+            );
+            return Err(AlertDescription::IllegalParameter);
+        }
+
+        let (_, exts) = parse::vec16("ServerHello extensions", b, 6, 1)?;
+
+        let (_, exts) = ServerHelloExtensions::deser(exts)?;
+
+        Ok(Self {
+            random,
+            legacy_session_id_echo,
+            cipher_suite,
+            exts,
+        })
     }
 }

@@ -1,6 +1,6 @@
 # TLS tester
 
-A rust crate for testing [TLS 1.3] client implementations.
+A tool for testing [TLS 1.3] implementation compliance.
 
 > [!WARNING]  
 > This is in a pre-alpha state, the crate is missing:
@@ -12,7 +12,7 @@ A rust crate for testing [TLS 1.3] client implementations.
 
 - Hackability
 - Debugability
-- Testing TLS client implementation compliance
+- Testing TLS implementation compliance
 
 ## Non-goals
 

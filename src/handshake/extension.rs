@@ -15,9 +15,9 @@ pub use psk::{OfferedPsks, PskServerHello};
 pub use record_size_limit::RecordSizeLimit;
 pub use server_name::ServerNameList;
 use signature_scheme::{SignatureScheme, deser_signature_scheme_list};
-pub use supported_versions::{SupportedVersionsClientHello, SupportedVersionsServerHello};
+pub use supported_versions::SupportedVersionsClientHello;
 
-use crate::{AlertDescription, parse};
+use crate::{alert::AlertDescription, parse, tls_version::TlsVersion};
 
 use super::named_group::{NamedGroup, deser_named_group_list};
 
@@ -257,7 +257,7 @@ impl ClientHelloExtensions {
                     pre_shared_key.replace(offered_psks);
                 }
                 Ok(ExtensionType::EarlyData) => {
-                    log::warn!("Ignoring ClientHello extension");
+                    log::warn!("Ignoring ClientHello extension EarlyData");
                 }
                 Ok(ExtensionType::SupportedVersions) => {
                     let supported_versions_deser = SupportedVersionsClientHello::deser(data)?;
@@ -302,7 +302,7 @@ impl ClientHelloExtensions {
                     // Otherwise, it may fail to interoperate with newer clients.  In
                     // TLS 1.3, a client receiving a CertificateRequest or
                     // NewSessionTicket MUST also ignore all unrecognized extensions.
-                    log::warn!("Ignoring unknown extension {val}");
+                    log::warn!("Ignoring unknown ClientHello extension 0x{val:04X}");
                 }
             }
         }
@@ -421,10 +421,10 @@ impl ClientHelloExtensions {
 /// ```
 #[derive(Debug)]
 pub enum ServerHelloExtension {
-    PreSharedKey(PskServerHello),                    // RFC 8446
-    SupportedVersions(SupportedVersionsServerHello), // RFC 8446
-    KeyShareServerHello(KeyShareServerHello),        // RFC 8446
-    KeyShareHelloRetryRequest(NamedGroup),           // RFC 8446
+    PreSharedKey(PskServerHello),             // RFC 8446
+    SupportedVersions(TlsVersion),            // RFC 8446
+    KeyShareServerHello(KeyShareServerHello), // RFC 8446
+    KeyShareHelloRetryRequest(NamedGroup),    // RFC 8446
 }
 
 impl ServerHelloExtension {
@@ -459,6 +459,162 @@ impl ServerHelloExtension {
         ret.extend_from_slice(ext_data);
 
         ret
+    }
+}
+
+/// ServerHello extensions.
+///
+/// # References
+///
+/// * [RFC 8446 Section 4.2](https://datatracker.ietf.org/doc/html/rfc8446#section-4.2)
+/// * [RFC 8449](https://datatracker.ietf.org/doc/html/rfc8449)
+///
+/// ```text
+/// struct {
+///     ExtensionType extension_type;
+///     opaque extension_data<0..2^16-1>;
+/// } Extension;
+/// ```
+#[derive(Debug)]
+pub struct ServerHelloExtensions {
+    // pre_shared_key: PskServerHello,                   // RFC 8446
+    pub supported_versions: u16, // RFC 8446
+    pub key_share: KeyShareServerHello, // RFC 8446
+                                 // key_share_hello_retry: NamedGroup,                // RFC 8446
+}
+
+impl ServerHelloExtensions {
+    pub fn deser(mut b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
+        let mut extenstion_types: HashSet<Result<ExtensionType, u16>> = HashSet::new();
+
+        let mut supported_versions: Option<u16> = None;
+        let mut key_share: Option<KeyShareServerHello> = None;
+
+        while !b.is_empty() {
+            let (new_b, extension_type): (_, u16) =
+                parse::u16("ServerHello extensions extension_type", b)?;
+            b = new_b;
+            let (new_b, data): (_, &[u8]) =
+                parse::vec16("ServerHello extensions extension_data", b, 0, 1)?;
+            b = new_b;
+
+            let extension_type = ExtensionType::try_from(extension_type);
+
+            let extension_pretty: String = match extension_type {
+                Ok(et) => format!("{et:?}"),
+                Err(val) => format!("{val}"),
+            };
+
+            // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
+            // There MUST NOT be more than one extension of the same type in a
+            // given extension block.
+            let duplicate: bool = !extenstion_types.insert(extension_type);
+            if duplicate {
+                log::error!("ServerHello Extension appeared more than once: {extension_pretty}");
+                return Err(AlertDescription::DecodeError)?;
+            }
+
+            match extension_type {
+                Ok(
+                    ExtensionType::ServerName
+                    | ExtensionType::MaxFragmentLength
+                    | ExtensionType::StatusRequest
+                    | ExtensionType::SupportedGroups
+                    | ExtensionType::SignatureAlgorithms
+                    | ExtensionType::UseSrtp
+                    | ExtensionType::Heartbeat
+                    | ExtensionType::ApplicationLayerProtocolNegotiation
+                    | ExtensionType::SignedCertificateTimestamp
+                    | ExtensionType::ClientCertificateType
+                    | ExtensionType::ServerCertificateType
+                    | ExtensionType::Padding
+                    | ExtensionType::EarlyData
+                    | ExtensionType::Cookie
+                    | ExtensionType::PskKeyExchangeModes
+                    | ExtensionType::CertificateAuthorities
+                    | ExtensionType::OidFilters
+                    | ExtensionType::PostHandshakeAuth
+                    | ExtensionType::SignatureAlgorithmsCert
+                    | ExtensionType::RecordSizeLimit,
+                ) => {
+                    // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
+                    // If an implementation receives an extension
+                    // which it recognizes and which is not specified for the message in
+                    // which it appears, it MUST abort the handshake with an
+                    // "illegal_parameter" alert.
+                    log::error!("ServerHello extension {extension_pretty} is not specified");
+                    return Err(AlertDescription::IllegalParameter);
+                }
+                Ok(ExtensionType::PreSharedKey) => {
+                    todo!("implement ServerHello ExtensionType::PreSharedKey");
+                    // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
+                    // When multiple extensions of different types are present, the
+                    // extensions MAY appear in any order, with the exception of
+                    // "pre_shared_key" (Section 4.2.11) which MUST be the last extension in
+                    // the ClientHello (but can appear anywhere in the ServerHello
+                    // extensions block).
+                    // if !b.is_empty() {
+                    //     log::error!("ServerHello PreSharedKey is not the last extension");
+                    //     return Err(AlertDescription::UnexpectedMessage);
+                    // }
+
+                    // let offered_psks = OfferedPsks::deser(data)?;
+
+                    // log::debug!("ServerHello PreSharedKey {offered_psks:?}");
+
+                    // pre_shared_key.replace(offered_psks);
+                }
+                Ok(ExtensionType::SupportedVersions) => {
+                    let data_sized: [u8; 2] = match data.try_into() {
+                        Ok(ds) => ds,
+                        Err(_) => {
+                            log::error!(
+                                "ServerHello extension SupportedVersions length is {} expected 2",
+                                data.len()
+                            );
+                            return Err(AlertDescription::DecodeError);
+                        }
+                    };
+
+                    let data_u16: u16 = u16::from_be_bytes(data_sized);
+
+                    log::debug!("< ServerHello supported_versions 0x{data_u16:04X}");
+
+                    supported_versions.replace(data_u16);
+                }
+                Ok(ExtensionType::KeyShare) => {
+                    let (_, key_share_sh) = KeyShareServerHello::deser(data)?;
+                    log::debug!("< ServerHello KeyShare {key_share_sh:?}");
+                    key_share.replace(key_share_sh);
+                }
+                Err(val) => {
+                    log::warn!("Ignoring unknown ServerHello extension 0x{val:04X}");
+                }
+            }
+        }
+
+        let supported_versions: u16 = match supported_versions {
+            Some(sv) => sv,
+            None => {
+                log::error!("ServerHello missing required supported_versions extension");
+                return Err(AlertDescription::MissingExtension);
+            }
+        };
+
+        let key_share: KeyShareServerHello = match key_share {
+            Some(ks) => ks,
+            None => {
+                log::error!("ServerHello missing required key_share extension");
+                return Err(AlertDescription::MissingExtension);
+            }
+        };
+
+        let exts: Self = Self {
+            supported_versions,
+            key_share,
+        };
+
+        Ok((b, exts))
     }
 }
 

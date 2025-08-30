@@ -6,13 +6,13 @@ mod named_group;
 mod server_hello;
 
 pub use certificate::{CertificateVerify, certificate_from_der};
-pub use client_hello::ClientHello;
-pub use extension::ServerHelloExtension;
+pub(crate) use client_hello::{ClientHello, ClientHelloBuilder};
+pub(crate) use extension::ServerHelloExtension;
 pub(crate) use finished::finished_with_hs_hdr;
 pub(crate) use named_group::NamedGroup;
-pub use server_hello::ServerHello;
+pub(crate) use server_hello::{ServerHello, ServerHelloBuilder};
 
-use crate::AlertDescription;
+use crate::alert::AlertDescription;
 
 /// Handshake Type.
 ///

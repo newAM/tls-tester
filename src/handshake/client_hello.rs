@@ -1,9 +1,22 @@
-use crate::parse;
+use rand::{RngCore as _, rngs::OsRng};
 
-use super::extension::ClientHelloExtensions;
-use crate::{AlertDescription, CipherSuite};
+use crate::{
+    handshake::extension::{ExtensionType, KeyShareClientHello},
+    parse,
+    tls_version::TlsVersion,
+};
 
-/// Create a list of cipher suites.
+use super::{
+    HandshakeHeader, HandshakeType,
+    extension::{
+        ClientHelloExtensions, SupportedVersionsClientHello,
+        signature_scheme::ser_signature_scheme_list,
+    },
+    named_group::ser_named_group_list,
+};
+use crate::{alert::AlertDescription, cipher_suite::CipherSuite};
+
+/// ClientHello handshake message.
 ///
 /// # References
 ///
@@ -81,5 +94,104 @@ impl ClientHello {
             legacy_compression_methods: legacy_compression_methods.to_vec(),
             exts,
         })
+    }
+}
+
+pub(crate) struct ClientHelloBuilder {
+    random: [u8; 32],
+}
+
+impl ClientHelloBuilder {
+    pub fn new() -> Self {
+        let mut random: [u8; 32] = [0; 32];
+        OsRng.fill_bytes(&mut random);
+        Self { random }
+    }
+
+    pub fn random(&self) -> [u8; 32] {
+        self.random
+    }
+
+    pub fn build(&self, pub_key: &[u8; 65]) -> Vec<u8> {
+        let mut data: Vec<u8> = Vec::new();
+
+        // legacy_version
+        data.extend_from_slice(0x0303_u16.to_be_bytes().as_ref());
+
+        // random
+        data.extend_from_slice(&self.random);
+
+        // legacy_session_id
+        // this is just the length byte
+        data.push(0);
+
+        // cipher_suites
+        data.extend_from_slice(2_u16.to_be_bytes().as_ref());
+        data.extend_from_slice(
+            u16::from(CipherSuite::TLS_AES_128_GCM_SHA256)
+                .to_be_bytes()
+                .as_ref(),
+        );
+
+        // legacy_compression_methods
+        data.push(1);
+        data.push(0);
+
+        let mut extensions: Vec<u8> = Vec::new();
+
+        let supported_versions: Vec<u8> = SupportedVersionsClientHello::ser(&[TlsVersion::V1_3]);
+        extensions.extend_from_slice(ExtensionType::SupportedVersions.to_be_bytes().as_ref());
+        extensions.extend_from_slice(
+            u16::try_from(supported_versions.len())
+                .unwrap()
+                .to_be_bytes()
+                .as_ref(),
+        );
+        extensions.extend_from_slice(&supported_versions);
+
+        let key_share: Vec<u8> = KeyShareClientHello::ser_secp256r1(pub_key);
+        extensions.extend_from_slice(ExtensionType::KeyShare.to_be_bytes().as_ref());
+        extensions.extend_from_slice(
+            u16::try_from(key_share.len())
+                .unwrap()
+                .to_be_bytes()
+                .as_ref(),
+        );
+        extensions.extend_from_slice(&key_share);
+
+        let supported_grups: Vec<u8> = ser_named_group_list();
+        extensions.extend_from_slice(ExtensionType::SupportedGroups.to_be_bytes().as_ref());
+        extensions.extend_from_slice(
+            u16::try_from(supported_grups.len())
+                .unwrap()
+                .to_be_bytes()
+                .as_ref(),
+        );
+        extensions.extend_from_slice(&supported_grups);
+
+        let signature_algorithms: Vec<u8> = ser_signature_scheme_list();
+        extensions.extend_from_slice(ExtensionType::SignatureAlgorithms.to_be_bytes().as_ref());
+        extensions.extend_from_slice(
+            u16::try_from(signature_algorithms.len())
+                .unwrap()
+                .to_be_bytes()
+                .as_ref(),
+        );
+        extensions.extend_from_slice(&signature_algorithms);
+
+        // extensions
+        let extensions_len: u16 = extensions.len().try_into().unwrap();
+        data.extend_from_slice(extensions_len.to_be_bytes().as_ref());
+        data.extend_from_slice(extensions.as_ref());
+
+        // pub key_share: KeyShareClientHello,
+        // pub server_name_list: Option<ServerNameList>,
+        // pub supported_groups: Vec<NamedGroup>,
+        // pub signature_algorithms: Option<Vec<SignatureScheme>>,
+        // pub pre_shared_key: Option<OfferedPsks>,
+        // pub psk_key_exchange_modes: Option<PskKeyExchangeModes>,
+        // pub record_size_limit: Option<RecordSizeLimit>,
+
+        HandshakeHeader::prepend_header(HandshakeType::ClientHello, &data)
     }
 }

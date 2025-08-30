@@ -1,4 +1,4 @@
-use crate::AlertDescription;
+use crate::alert::AlertDescription;
 
 /// # Reference
 ///
