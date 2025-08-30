@@ -1,4 +1,4 @@
-use crate::{AlertDescription, handshake::named_group::NamedGroup, parse};
+use crate::{alert::AlertDescription, handshake::named_group::NamedGroup, parse};
 
 /// KeyShare entry.
 ///
@@ -14,8 +14,8 @@ use crate::{AlertDescription, handshake::named_group::NamedGroup, parse};
 /// ```
 #[derive(Debug)]
 pub(crate) struct KeyShareEntry {
-    group: Result<NamedGroup, u16>,
-    key_exchange: Vec<u8>,
+    pub group: Result<NamedGroup, u16>,
+    pub key_exchange: Vec<u8>,
 }
 
 impl KeyShareEntry {
@@ -78,6 +78,8 @@ pub struct KeyShareClientHello {
 }
 
 impl KeyShareClientHello {
+    const CLIENT_SHARE_LEN_EXPECTED: usize = 65;
+
     pub fn deser_secp256r1(b: &[u8]) -> Result<Self, AlertDescription> {
         let (_, mut b) = parse::vec16("KeyShareClientHello client_shares", b, 0, 1)?;
 
@@ -90,13 +92,12 @@ impl KeyShareClientHello {
             b = new_b;
 
             if client_share.group == Ok(NamedGroup::secp256r1) {
-                const CLIENT_SHARE_LEN_EXPECTED: usize = 65;
                 let client_share_len: usize = client_share.key_exchange.len();
-                if client_share_len != CLIENT_SHARE_LEN_EXPECTED {
+                if client_share_len != Self::CLIENT_SHARE_LEN_EXPECTED {
                     log::error!(
-                        "KeyShareEntry secp256r1 has key_exchange length {} expected {}",
+                        "ClientHello KeyShareEntry secp256r1 has key_exchange length {} expected {}",
                         client_share_len,
-                        CLIENT_SHARE_LEN_EXPECTED
+                        Self::CLIENT_SHARE_LEN_EXPECTED
                     );
                     return Err(AlertDescription::DecodeError)?;
                 }
@@ -105,7 +106,7 @@ impl KeyShareClientHello {
                     Ok(pk) => Some(pk),
                     Err(_) => {
                         log::error!(
-                            "KeyShareEntry secp256r1 key_exchange data is not a valid SEC1 public key"
+                            "ClientHello KeyShareEntry secp256r1 key_exchange data is not a valid SEC1 public key"
                         );
                         return Err(AlertDescription::DecodeError)?;
                     }
@@ -120,6 +121,32 @@ impl KeyShareClientHello {
 
     pub fn is_empty(&self) -> bool {
         self.empty
+    }
+
+    pub fn ser_secp256r1(key: &[u8; 65]) -> Vec<u8> {
+        let mut ret: Vec<u8> = Vec::new();
+
+        ret.extend_from_slice(
+            u16::try_from(Self::CLIENT_SHARE_LEN_EXPECTED)
+                .unwrap()
+                .checked_add(4)
+                .unwrap()
+                .to_be_bytes()
+                .as_ref(),
+        );
+
+        ret.extend_from_slice(NamedGroup::secp256r1.to_be_bytes().as_ref());
+
+        ret.extend_from_slice(
+            u16::try_from(Self::CLIENT_SHARE_LEN_EXPECTED)
+                .unwrap()
+                .to_be_bytes()
+                .as_ref(),
+        );
+
+        ret.extend_from_slice(key);
+
+        ret
     }
 }
 

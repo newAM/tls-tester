@@ -1,4 +1,4 @@
-use crate::{AlertDescription, parse};
+use crate::{alert::AlertDescription, parse};
 
 /// # References
 ///

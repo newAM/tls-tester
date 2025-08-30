@@ -1,4 +1,4 @@
-use crate::{AlertDescription, parse};
+use crate::{alert::AlertDescription, parse};
 
 /// # References
 ///
@@ -103,6 +103,15 @@ impl TryFrom<u16> for SignatureScheme {
     }
 }
 
+/// # References
+///
+/// - [RFC 8446 Appendix B.3.1.3](https://datatracker.ietf.org/doc/html/rfc8446#appendix-B.3.1.3)
+///
+/// ```text
+/// struct {
+///     SignatureScheme supported_signature_algorithms<2..2^16-2>;
+/// } SignatureSchemeList;
+/// ```
 pub(crate) fn deser_signature_scheme_list(
     b: &[u8],
 ) -> Result<Vec<SignatureScheme>, AlertDescription> {
@@ -126,4 +135,15 @@ pub(crate) fn deser_signature_scheme_list(
     }
 
     Ok(ret)
+}
+
+pub(crate) fn ser_signature_scheme_list() -> Vec<u8> {
+    let mut ret: Vec<u8> = Vec::new();
+    ret.extend_from_slice(2_u16.to_be_bytes().as_ref());
+    ret.extend_from_slice(
+        SignatureScheme::ecdsa_secp256r1_sha256
+            .to_be_bytes()
+            .as_ref(),
+    );
+    ret
 }

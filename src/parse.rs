@@ -2,7 +2,7 @@
 // maybe accept a multiple argument for len validation, also a min then?
 // vec16
 
-use crate::AlertDescription;
+use crate::alert::AlertDescription;
 
 pub fn u8<'a>(name: &str, buf: &'a [u8]) -> Result<(&'a [u8], u8), AlertDescription> {
     match buf.split_at_checked(1) {
@@ -89,12 +89,12 @@ pub fn vec16<'a>(
     };
 
     if len < min {
-        log::error!("{name} length is less than minimum of {min}");
+        log::error!("{name} length of {len} is less than minimum of {min}");
         return Err(AlertDescription::DecodeError);
     }
 
     if len % multiple != 0 {
-        log::error!("{name} length is not a multiple of {multiple}");
+        log::error!("{name} length of {len} is not a multiple of {multiple}");
         return Err(AlertDescription::DecodeError);
     }
 

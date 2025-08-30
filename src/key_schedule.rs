@@ -7,7 +7,7 @@
 //!
 //! [RFC 5869]: https://datatracker.ietf.org/doc/html/rfc5869
 
-use crate::AlertDescription;
+use crate::alert::AlertDescription;
 use hkdf::Hkdf;
 use hmac::Mac;
 use p256::{PublicKey, ecdh::EphemeralSecret};
@@ -120,9 +120,16 @@ fn print_nss_key_log(label: &str, client_random: &[u8; 32], secret: &[u8]) {
     println!();
 }
 
+pub enum KeyScheduleMain {
+    Server,
+    Client,
+}
+
 pub struct KeySchedule {
-    server_secret: Option<EphemeralSecret>,
-    client_public: Option<PublicKey>,
+    secret_key: Option<EphemeralSecret>,
+    public_key: Option<PublicKey>,
+
+    main: KeyScheduleMain,
 
     // https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.1
     // Many of the cryptographic computations in TLS make use of a
@@ -149,12 +156,12 @@ pub struct KeySchedule {
     server_traffic_secret: Option<Hkdf<Sha256>>,
 
     // only for NSS key logging
-    pub client_random: Option<[u8; 32]>,
+    pub random: Option<[u8; 32]>,
     traffic_secret_count: u64,
 }
 
-impl Default for KeySchedule {
-    fn default() -> Self {
+impl KeySchedule {
+    fn new_main(main: KeyScheduleMain) -> Self {
         let (_, hkdf): (GenericArray<u8, _>, Hkdf<Sha256>) = Hkdf::<Sha256>::extract(
             Some(&ZEROS_OF_SHA256_DIGEST_LEN),
             &ZEROS_OF_SHA256_DIGEST_LEN,
@@ -162,8 +169,9 @@ impl Default for KeySchedule {
         let secret: GenericArray<u8, _> = derive_secret(&hkdf, b"derived", &SHA256_EMPTY_DIGEST);
 
         Self {
-            server_secret: None,
-            client_public: None,
+            secret_key: None,
+            public_key: None,
+            main,
             transcript_hash: sha2::Sha256::new(),
             read_record_sequence_number: 0,
             write_record_sequence_number: 0,
@@ -171,13 +179,19 @@ impl Default for KeySchedule {
             secret,
             client_traffic_secret: None,
             server_traffic_secret: None,
-            client_random: None,
+            random: None,
             traffic_secret_count: 0,
         }
     }
-}
 
-impl KeySchedule {
+    pub fn new_server() -> Self {
+        Self::new_main(KeyScheduleMain::Server)
+    }
+
+    pub fn new_client() -> Self {
+        Self::new_main(KeyScheduleMain::Client)
+    }
+
     pub fn increment_read_record_sequence_number(&mut self) {
         self.read_record_sequence_number = self.read_record_sequence_number.checked_add(1).unwrap();
         log::debug!(
@@ -195,12 +209,15 @@ impl KeySchedule {
     }
 
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = match self.main {
+            KeyScheduleMain::Server => Self::new_server(),
+            KeyScheduleMain::Client => Self::new_client(),
+        }
     }
 
-    /// Create a new ephemeral server secret, and return the public key bytes
-    /// as an uncompressed SEC1 encoded point.
-    pub fn new_server_secret(&mut self) -> [u8; 65] {
+    /// Create a new ephemeral secret, and return the public key bytes as an
+    /// uncompressed SEC1 encoded point.
+    pub fn new_secret_key(&mut self) -> [u8; 65] {
         let (private, public) = {
             let private_key = p256::ecdh::EphemeralSecret::random(&mut OsRng);
             let public_sec1_bytes: [u8; 65] = p256::EncodedPoint::from(private_key.public_key())
@@ -209,7 +226,7 @@ impl KeySchedule {
                 .unwrap();
             (private_key, public_sec1_bytes)
         };
-        self.server_secret.replace(private);
+        self.secret_key.replace(private);
         public
     }
 
@@ -229,18 +246,18 @@ impl KeySchedule {
         self.transcript_hash.clone()
     }
 
-    pub fn set_client_public_key(&mut self, key: PublicKey) {
-        self.client_public.replace(key);
+    pub fn set_public_key(&mut self, key: PublicKey) {
+        self.public_key.replace(key);
     }
 
     fn shared_secret(&self) -> SharedSecret {
-        self.server_secret
+        self.secret_key
             .as_ref()
-            .expect("KeySchedule.server_secret has not been initialized")
+            .expect("KeySchedule.secret_key has not been initialized")
             .diffie_hellman(
-                self.client_public
+                self.public_key
                     .as_ref()
-                    .expect("KeySchedule.client_public has not been initialized"),
+                    .expect("KeySchedule.public_key has not been initialized"),
             )
             .raw_secret_bytes()
             .as_slice()
@@ -292,7 +309,7 @@ impl KeySchedule {
 
         print_nss_key_log(
             "CLIENT_EARLY_TRAFFIC_SECRET",
-            self.client_random.as_ref().unwrap(),
+            self.random.as_ref().unwrap(),
             &client_secret,
         );
     }
@@ -320,12 +337,12 @@ impl KeySchedule {
         {
             print_nss_key_log(
                 "CLIENT_HANDSHAKE_TRAFFIC_SECRET",
-                self.client_random.as_ref().unwrap(),
+                self.random.as_ref().unwrap(),
                 &client_secret,
             );
             print_nss_key_log(
                 "SERVER_HANDSHAKE_TRAFFIC_SECRET",
-                self.client_random.as_ref().unwrap(),
+                self.random.as_ref().unwrap(),
                 &server_secret,
             );
         }
@@ -354,12 +371,12 @@ impl KeySchedule {
         {
             print_nss_key_log(
                 &format!("CLIENT_TRAFFIC_SECRET_{}", self.traffic_secret_count),
-                self.client_random.as_ref().unwrap(),
+                self.random.as_ref().unwrap(),
                 &client_secret,
             );
             print_nss_key_log(
                 &format!("SERVER_TRAFFIC_SECRET_{}", self.traffic_secret_count),
-                self.client_random.as_ref().unwrap(),
+                self.random.as_ref().unwrap(),
                 &server_secret,
             );
             self.traffic_secret_count += 1;
@@ -400,12 +417,12 @@ impl KeySchedule {
         {
             print_nss_key_log(
                 &format!("CLIENT_TRAFFIC_SECRET_{}", self.traffic_secret_count),
-                self.client_random.as_ref().unwrap(),
+                self.random.as_ref().unwrap(),
                 &client_secret,
             );
             print_nss_key_log(
                 &format!("SERVER_TRAFFIC_SECRET_{}", self.traffic_secret_count),
-                self.client_random.as_ref().unwrap(),
+                self.random.as_ref().unwrap(),
                 &server_secret,
             );
             self.traffic_secret_count += 1;
@@ -416,20 +433,33 @@ impl KeySchedule {
         self.server_traffic_secret.is_some()
     }
 
-    pub fn client_key_and_nonce(&self) -> Option<([u8; 16], [u8; 12])> {
-        let traffic_secret = self.client_traffic_secret.as_ref()?;
-
-        let key: [u8; 16] = hkdf_expand_label(traffic_secret, b"key", &[]).into();
-        let mut iv: GenericArray<u8, U12> = hkdf_expand_label(traffic_secret, b"iv", &[]);
-        self.read_record_sequence_number
-            .to_be_bytes()
-            .iter()
-            .enumerate()
-            .for_each(|(idx, byte)| iv[idx + 4] ^= byte);
-        Some((key, iv.into()))
+    pub fn write_key_and_nonce(&self) -> Option<([u8; 16], [u8; 12])> {
+        match self.main {
+            KeyScheduleMain::Server => self.key_and_nonce(
+                self.server_traffic_secret.as_ref()?,
+                self.write_record_sequence_number,
+            ),
+            KeyScheduleMain::Client => self.key_and_nonce(
+                self.client_traffic_secret.as_ref()?,
+                self.write_record_sequence_number,
+            ),
+        }
     }
 
-    /// Get the server key and nonce.
+    pub fn read_key_and_nonce(&self) -> Option<([u8; 16], [u8; 12])> {
+        match self.main {
+            KeyScheduleMain::Server => self.key_and_nonce(
+                self.client_traffic_secret.as_ref()?,
+                self.read_record_sequence_number,
+            ),
+            KeyScheduleMain::Client => self.key_and_nonce(
+                self.server_traffic_secret.as_ref()?,
+                self.read_record_sequence_number,
+            ),
+        }
+    }
+
+    /// Get the key and nonce.
     ///
     /// # References
     ///
@@ -438,12 +468,15 @@ impl KeySchedule {
     /// ```text
     /// [sender]_write_key = HKDF-Expand-Label(Secret, "key", "", key_length)
     /// ```
-    pub fn server_key_and_nonce(&self) -> Option<([u8; 16], [u8; 12])> {
-        let traffic_secret = self.server_traffic_secret.as_ref()?;
-
+    fn key_and_nonce(
+        &self,
+        traffic_secret: &Hkdf<Sha256>,
+        sequence_number: u64,
+    ) -> Option<([u8; 16], [u8; 12])> {
         let key: [u8; 16] = hkdf_expand_label(traffic_secret, b"key", &[]).into();
         let mut iv: GenericArray<u8, U12> = hkdf_expand_label(traffic_secret, b"iv", &[]);
-        self.write_record_sequence_number
+
+        sequence_number
             .to_be_bytes()
             .iter()
             .enumerate()
@@ -468,7 +501,11 @@ impl KeySchedule {
     ///          Transcript-Hash(Handshake Context,
     ///                          Certificate*, CertificateVerify*))
     /// ```
-    pub fn verify_server_finished(&self, finished: &[u8; 32]) -> Result<(), AlertDescription> {
+    pub fn verify_server_finished(
+        &self,
+        transcript_hash: &GenericArray<u8, U32>,
+        finished: &[u8; 32],
+    ) -> Result<(), AlertDescription> {
         let key: GenericArray<u8, U32> = hkdf_expand_label(
             self.server_traffic_secret.as_ref().unwrap(),
             b"finished",
@@ -476,7 +513,7 @@ impl KeySchedule {
         );
 
         let mut hmac = hmac::Hmac::<Sha256>::new_from_slice(&key).unwrap();
-        hmac.update(&self.transcript_hash_bytes());
+        hmac.update(transcript_hash);
 
         // Recipients of Finished messages MUST verify that the contents are
         // correct and if incorrect MUST terminate the connection with a

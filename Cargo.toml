@@ -1,6 +1,6 @@
 [package]
 name = "tls-tester"
-description = "A TLS 1.3 server for testing client implementations"
+description = "A tool for testing TLS 1.3 implementation compliance"
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"

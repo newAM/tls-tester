@@ -6,7 +6,7 @@ use std::{
     thread::sleep,
     time::{Duration, Instant},
 };
-use tls_tester::{ServerCertificates, TlsStream, TlsStreamBuilder};
+use tls_tester::{ServerCertificates, TlsServerBuilder, TlsServerStream};
 use w5500_mqtt::{
     Event,
     hl::Hostname,
@@ -32,7 +32,7 @@ fn monotonic_secs(start: Instant) -> u32 {
 }
 
 #[test]
-fn test_psk() {
+fn test_server_psk() {
     stderrlog::new()
         .verbosity(3)
         .timestamp(stderrlog::Timestamp::Nanosecond)
@@ -104,7 +104,7 @@ fn test_psk() {
     log::info!("Accepting connections");
     let (client, addr) = listener.accept().expect("Unable to accept connections");
     log::info!("Accepted connection from {addr}");
-    let mut tls_stream: TlsStream = TlsStreamBuilder::new()
+    let mut tls_stream: TlsServerStream = TlsServerBuilder::new()
         .add_psk(PSK_ID, PSK)
         .handshake(client, certs)
         .expect("Failed to create TLS stream");

@@ -1,6 +1,7 @@
 use std::fmt::Debug;
 
-use crate::{AlertDescription, TlsVersion};
+use crate::alert::AlertDescription;
+use crate::tls_version::TlsVersion;
 
 /// Content Type.
 ///

@@ -1,4 +1,4 @@
-use crate::{AlertDescription, TlsVersion, parse};
+use crate::{alert::AlertDescription, parse, tls_version::TlsVersion};
 
 /// # References
 ///
@@ -20,8 +20,6 @@ pub struct SupportedVersionsClientHello {
     versions: Vec<u16>,
 }
 
-pub type SupportedVersionsServerHello = TlsVersion;
-
 impl SupportedVersionsClientHello {
     pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
         let (_, versions_b) = parse::vec8("SupportedVersions versions", b, 2, 2)?;
@@ -34,6 +32,26 @@ impl SupportedVersionsClientHello {
         }
 
         Ok(Self { versions })
+    }
+
+    pub fn ser(versions: &[TlsVersion]) -> Vec<u8> {
+        assert!(
+            !versions.is_empty(),
+            "At least one version must be supported"
+        );
+
+        let versions_len: u8 = u8::try_from(versions.len())
+            .unwrap()
+            .checked_mul(2)
+            .unwrap();
+
+        let mut data: Vec<u8> = Vec::new();
+        data.push(versions_len);
+        versions
+            .iter()
+            .for_each(|v| data.extend_from_slice(v.to_be_bytes().as_ref()));
+
+        data
     }
 
     pub fn supports_tlsv1_3(&self) -> bool {

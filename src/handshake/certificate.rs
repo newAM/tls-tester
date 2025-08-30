@@ -1,4 +1,4 @@
-use crate::{AlertDescription, handshake::ServerHelloExtension};
+use crate::{alert::AlertDescription, handshake::ServerHelloExtension};
 
 use super::extension::signature_scheme::SignatureScheme;
 

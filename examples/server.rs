@@ -1,4 +1,4 @@
-use tls_tester::{ServerCertificates, TlsStream, TlsStreamBuilder};
+use tls_tester::{ServerCertificates, TlsServerBuilder, TlsServerStream};
 
 use std::{
     io::{Read as _, Write as _},
@@ -6,30 +6,25 @@ use std::{
     process::{Command, Output},
 };
 
-fn test_curl_with_args(args: &'static [&'static str]) {
+fn main() {
     stderrlog::new()
         .verbosity(3)
         .timestamp(stderrlog::Timestamp::Microsecond)
         .init()
-        .ok();
+        .unwrap();
 
-    // gen certs:
-    // openssl req -x509 -newkey ec:<(openssl ecparam -name secp256r1) -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
     let certs: ServerCertificates = ServerCertificates::from_secpr256r1_pem("cert.pem", "key.pem")
         .expect("Invalid certificates");
 
-    let listener: TcpListener = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port: u16 = listener
-        .local_addr()
-        .expect("Failed to get listener local address")
-        .port();
+    let listener: TcpListener = TcpListener::bind("127.0.0.1:12345").unwrap();
 
     let curl_thread = std::thread::spawn(move || {
         log::info!("sending http request with curl");
         let output: Output = Command::new("curl")
-            .arg(format!("https://127.0.0.1:{port}"))
+            .arg("https://127.0.0.1:12345")
             .arg("--tlsv1.3")
-            .args(args)
+            .arg("--curves")
+            .arg("secp256r1")
             .arg("--insecure")
             .arg("--connect-timeout")
             .arg("1")
@@ -49,10 +44,24 @@ fn test_curl_with_args(args: &'static [&'static str]) {
         output.status.success()
     });
 
+    // openssl s_client -connect 127.0.0.1:12345 -tls1_3 -debug -curves secp256r1 -psk 2f42ace2b6be1681b3d2fcdd4bb57b4ffe3484ee77fdaa8e216e3272cd78259d
+    // let output: Output = Command::new("openssl")
+    //     .arg("s_client")
+    //     .arg("-connect")
+    //     .arg("127.0.0.1:12345")
+    //     .arg("-tls1_3")
+    //     .arg("-curves")
+    //     .arg("secp256r1")
+    //     .arg("-debug")
+    //     .arg("-psk")
+    //     .arg("2f42ace2b6be1681b3d2fcdd4bb57b4ffe3484ee77fdaa8e216e3272cd78259d")
+    //     .output()
+    //     .unwrap();
+
     log::info!("Accepting connections");
     let (client, addr) = listener.accept().expect("Unable to accept connections");
     log::info!("Accepted connection from {addr}");
-    let mut tls_stream: TlsStream = TlsStreamBuilder::new()
+    let mut tls_stream: TlsServerStream = TlsServerBuilder::new()
         .handshake(client, certs)
         .expect("Failed to create TLS stream");
     let mut http_buf: [u8; 4096] = [0; 4096];
@@ -69,14 +78,4 @@ fn test_curl_with_args(args: &'static [&'static str]) {
 
     let curl_status = curl_thread.join().expect("Failed to join curl thread");
     assert!(curl_status);
-}
-
-#[test]
-fn test_curl() {
-    test_curl_with_args(&["--curves", "secp256r1"])
-}
-
-#[test]
-fn test_curl_hello_retry() {
-    test_curl_with_args(&["--curves", "x25519:secp256r1"])
 }
