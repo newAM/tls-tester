@@ -60,8 +60,8 @@ impl ServerNameList {
     }
 }
 
-#[derive(Debug)]
-pub struct ServerName {
+#[derive(Debug, Clone)]
+pub(crate) struct ServerName {
     pub name: String,
 }
 
@@ -110,13 +110,17 @@ impl ServerName {
     }
 
     pub fn ser(&self) -> Vec<u8> {
-        let mut ret: Vec<u8> = Vec::with_capacity(3 + self.name.len());
+        let mut ret: Vec<u8> = Vec::with_capacity(self.name.len().saturating_add(5));
 
         // unwrap will never panic, length is validated in constructors
-        let len: [u8; 2] = u16::try_from(self.name.len()).unwrap().to_be_bytes();
+        let name_list_len: [u8; 2] = u16::try_from(self.name.len().saturating_add(3))
+            .unwrap()
+            .to_be_bytes();
+        let name_len: [u8; 2] = u16::try_from(self.name.len()).unwrap().to_be_bytes();
 
+        ret.extend_from_slice(&name_list_len);
         ret.push(0); // name_type host_name
-        ret.extend_from_slice(&len);
+        ret.extend_from_slice(&name_len);
         ret.extend(self.name.as_bytes());
 
         ret

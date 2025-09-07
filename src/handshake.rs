@@ -5,9 +5,9 @@ mod finished;
 mod named_group;
 mod server_hello;
 
-pub use certificate::{CertificateVerify, certificate_from_der};
+pub use certificate::certificate_from_der;
+pub(crate) use certificate::{Certificate, CertificateEntry, CertificateVerify};
 pub(crate) use client_hello::{ClientHello, ClientHelloBuilder};
-pub(crate) use extension::ServerHelloExtension;
 pub(crate) use finished::finished_with_hs_hdr;
 pub(crate) use named_group::NamedGroup;
 pub(crate) use server_hello::{ServerHello, ServerHelloBuilder};

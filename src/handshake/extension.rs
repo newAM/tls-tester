@@ -13,6 +13,7 @@ pub use key_share::{KeyShareClientHello, KeyShareServerHello};
 use psk::PskKeyExchangeModes;
 pub use psk::{OfferedPsks, PskServerHello};
 pub use record_size_limit::RecordSizeLimit;
+pub(crate) use server_name::ServerName;
 pub use server_name::ServerNameList;
 use signature_scheme::{SignatureScheme, deser_signature_scheme_list};
 pub use supported_versions::SupportedVersionsClientHello;
@@ -546,21 +547,22 @@ impl ServerHelloExtensions {
                     return Err(AlertDescription::IllegalParameter);
                 }
                 Ok(ExtensionType::PreSharedKey) => {
-                    todo!("implement ServerHello ExtensionType::PreSharedKey");
                     // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
                     // When multiple extensions of different types are present, the
                     // extensions MAY appear in any order, with the exception of
                     // "pre_shared_key" (Section 4.2.11) which MUST be the last extension in
                     // the ClientHello (but can appear anywhere in the ServerHello
                     // extensions block).
-                    // if !b.is_empty() {
-                    //     log::error!("ServerHello PreSharedKey is not the last extension");
-                    //     return Err(AlertDescription::UnexpectedMessage);
-                    // }
+                    if !b.is_empty() {
+                        log::error!("ServerHello PreSharedKey is not the last extension");
+                        return Err(AlertDescription::UnexpectedMessage);
+                    }
+
+                    todo!("implement ServerHello ExtensionType::PreSharedKey");
 
                     // let offered_psks = OfferedPsks::deser(data)?;
 
-                    // log::debug!("ServerHello PreSharedKey {offered_psks:?}");
+                    // log::debug!("< ServerHello PreSharedKey {offered_psks:?}");
 
                     // pre_shared_key.replace(offered_psks);
                 }

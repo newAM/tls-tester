@@ -28,7 +28,7 @@
 
       preCheck = ''
         export SSL_CERT_FILE="${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
-        openssl req -x509 -newkey ec:<(openssl ecparam -name secp256r1) -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
+        openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
       '';
 
       nativeCheckInputs = with pkgs; [

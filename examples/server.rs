@@ -8,7 +8,7 @@ use std::{
 
 fn main() {
     stderrlog::new()
-        .verbosity(3)
+        .verbosity(4)
         .timestamp(stderrlog::Timestamp::Microsecond)
         .init()
         .unwrap();

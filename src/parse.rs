@@ -34,6 +34,20 @@ pub fn u32<'a>(name: &str, buf: &'a [u8]) -> Result<(&'a [u8], u32), AlertDescri
     }
 }
 
+pub fn n<'a>(
+    name: &str,
+    buf: &'a [u8],
+    n: usize,
+) -> Result<(&'a [u8], &'a [u8]), AlertDescription> {
+    match buf.split_at_checked(n) {
+        Some((val, remain)) => Ok((remain, val)),
+        None => {
+            log::error!("{name} is missing");
+            Err(AlertDescription::DecodeError)
+        }
+    }
+}
+
 pub fn vec8<'a>(
     name: &str,
     buf: &'a [u8],
@@ -100,6 +114,49 @@ pub fn vec16<'a>(
 
     const DATA_START: usize = 2;
     let data_end: usize = usize::from(len) + DATA_START;
+
+    let data = match buf.get(DATA_START..data_end) {
+        Some(data) => data,
+        None => {
+            log::error!("{name} does not have enough data for length {len}");
+            return Err(AlertDescription::DecodeError);
+        }
+    };
+
+    let remain = &buf[data_end..];
+
+    Ok((remain, data))
+}
+
+pub fn vec24<'a>(
+    name: &str,
+    buf: &'a [u8],
+    min: u32,
+    multiple: u32,
+) -> Result<(&'a [u8], &'a [u8]), AlertDescription> {
+    let len: u32 = match buf.get(..3) {
+        Some(l) => {
+            let be_bytes: [u8; 4] = [0, l[0], l[1], l[2]];
+            u32::from_be_bytes(be_bytes)
+        }
+        None => {
+            log::error!("{name} length is missing");
+            return Err(AlertDescription::DecodeError);
+        }
+    };
+
+    if len < min {
+        log::error!("{name} length of {len} is less than minimum of {min}");
+        return Err(AlertDescription::DecodeError);
+    }
+
+    if len % multiple != 0 {
+        log::error!("{name} length of {len} is not a multiple of {multiple}");
+        return Err(AlertDescription::DecodeError);
+    }
+
+    const DATA_START: usize = 3;
+    let data_end: usize = usize::try_from(len).expect("unsupported architecture") + DATA_START;
 
     let data = match buf.get(DATA_START..data_end) {
         Some(data) => data,

@@ -9,7 +9,7 @@ use crate::{
 use super::{
     HandshakeHeader, HandshakeType,
     extension::{
-        ClientHelloExtensions, SupportedVersionsClientHello,
+        ClientHelloExtensions, ServerName, SupportedVersionsClientHello,
         signature_scheme::ser_signature_scheme_list,
     },
     named_group::ser_named_group_list,
@@ -82,7 +82,10 @@ impl ClientHello {
         let (remain, exts): (_, ClientHelloExtensions) = ClientHelloExtensions::deser(b)?;
 
         if !remain.is_empty() {
-            log::error!("ClientHello contains data after extensions");
+            log::error!(
+                "ClientHello contains {} bytes of data after extensions",
+                remain.len()
+            );
             return Err(AlertDescription::DecodeError)?;
         }
 
@@ -99,13 +102,22 @@ impl ClientHello {
 
 pub(crate) struct ClientHelloBuilder {
     random: [u8; 32],
+    server_name: Option<ServerName>,
 }
 
 impl ClientHelloBuilder {
     pub fn new() -> Self {
         let mut random: [u8; 32] = [0; 32];
         OsRng.fill_bytes(&mut random);
-        Self { random }
+        Self {
+            random,
+            server_name: None,
+        }
+    }
+
+    pub fn set_server_name(mut self, server_name: Option<ServerName>) -> Self {
+        self.server_name = server_name;
+        self
     }
 
     pub fn random(&self) -> [u8; 32] {
@@ -178,6 +190,18 @@ impl ClientHelloBuilder {
                 .as_ref(),
         );
         extensions.extend_from_slice(&signature_algorithms);
+
+        if let Some(server_name) = &self.server_name {
+            extensions.extend_from_slice(ExtensionType::ServerName.to_be_bytes().as_ref());
+            let server_name_data: Vec<u8> = server_name.ser();
+            extensions.extend_from_slice(
+                u16::try_from(server_name_data.len())
+                    .unwrap()
+                    .to_be_bytes()
+                    .as_ref(),
+            );
+            extensions.extend_from_slice(&server_name_data);
+        }
 
         // extensions
         let extensions_len: u16 = extensions.len().try_into().unwrap();

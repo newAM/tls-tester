@@ -19,6 +19,7 @@ A tool for testing [TLS 1.3] implementation compliance.
 - Performance
 - Security
 - Versions of TLS older than [TLS 1.3]
+- `#![no_std]` support
 - Strict TLS compliance
   - TLS tester needs to create non-compliant behaviour to test compliance, for all other purposes TLS tester should be compliant unless otherwise noted
 
@@ -33,6 +34,7 @@ A tool for testing [TLS 1.3] implementation compliance.
     - `TLS_CHACHA20_POLY1305_SHA256`
   - Does not implement all recommended key exchange algorithms, missing:
     - `X25519`
+  - Client does not validate server certificates against a trust anchor
 - PSK does not support `psk_ke`, only `psk_dhe_ke` is supported
 
 ## Available tests
@@ -51,6 +53,17 @@ A tool for testing [TLS 1.3] implementation compliance.
 - Sending duplicate handshake message types
 - Sending handshake messages out of order
 - Zero length alert/handshake/applicationdata
+- Zero padding appended to records
+- Certificates with GeneralizedTime and UTCTime types for notBefore and notAfter
+  - UTCTime before 2050
+  - GeneralizedTime after 2050
+- Sending unrecognized values for:
+  - cipher suites
+  - hello extensions
+  - named groups
+  - key shared
+  - supported versions
+  - signature algorithms
 
 ## License
 

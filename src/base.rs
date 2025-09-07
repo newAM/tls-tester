@@ -201,6 +201,11 @@ impl TlsStream {
                 self.key_schedule.increment_read_record_sequence_number();
             }
             ContentType::ApplicationData => {
+                if matches!(self.state, TlsState::WaitServerHello) {
+                    log::error!("Unexpected ApplicationData in state {:?}", self.state);
+                    return Err(AlertDescription::UnexpectedMessage)?;
+                }
+
                 // + 1 is for content type
                 if usize::from(rec_hdr.length()) < GCM_TAG_LEN + 1 {
                     log::error!(
@@ -233,8 +238,21 @@ impl TlsStream {
                     return Err(AlertDescription::BadRecordMac)?;
                 }
 
-                // unwrap will not occur due to initial length checks
-                let content_type_byte: u8 = buf.pop().unwrap();
+                // https://datatracker.ietf.org/doc/html/rfc8446#section-5.4
+                let mut content_type_byte: Option<u8> = None;
+                while let Some(byte) = buf.pop() {
+                    if byte != 0 {
+                        content_type_byte.replace(byte);
+                        break;
+                    }
+                }
+                let content_type_byte: u8 = match content_type_byte {
+                    Some(b) => b,
+                    None => {
+                        log::error!("ApplicationData record has no content type");
+                        return Err(AlertDescription::DecodeError)?;
+                    }
+                };
                 let real_content_type: ContentType = match ContentType::try_from(content_type_byte)
                 {
                     Ok(content_type) => content_type,

@@ -10,13 +10,13 @@ use std::{
 #[test]
 fn test_loopback() {
     stderrlog::new()
-        .verbosity(3)
+        .verbosity(4)
         .timestamp(stderrlog::Timestamp::Microsecond)
         .init()
         .ok();
 
     // gen certs:
-    // openssl req -x509 -newkey ec:<(openssl ecparam -name secp256r1) -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
+    // openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
     let certs: ServerCertificates = ServerCertificates::from_secpr256r1_pem("cert.pem", "key.pem")
         .expect("Invalid certificates");
 

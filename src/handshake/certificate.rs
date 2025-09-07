@@ -1,4 +1,4 @@
-use crate::{alert::AlertDescription, handshake::ServerHelloExtension};
+use crate::{alert::AlertDescription, parse, x509};
 
 use super::extension::signature_scheme::SignatureScheme;
 
@@ -41,9 +41,29 @@ pub enum CertificateType {
 /// } CertificateEntry;
 /// ```
 #[derive(Debug)]
-pub struct CertificateEntry {
-    data: Vec<u8>,
-    extensions: Vec<ServerHelloExtension>,
+pub(crate) struct CertificateEntry {
+    pub(crate) data: x509::Certificate,
+    pub(crate) tbs_certificate: Vec<u8>,
+    pub(crate) extensions: Vec<u8>,
+}
+
+impl CertificateEntry {
+    pub fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
+        let (b, data): (_, &[u8]) = parse::vec24("CertificateEntry cert_data", b, 1, 1)?;
+        let (b, extensions): (_, &[u8]) = parse::vec16("CertificateEntry extensions", b, 0, 1)?;
+
+        let (tbs_certificate_bytes, data): (&[u8], x509::Certificate) =
+            x509::Certificate::deser(data).ok_or(AlertDescription::BadCertificate)?;
+
+        Ok((
+            b,
+            Self {
+                data,
+                tbs_certificate: tbs_certificate_bytes.into(),
+                extensions: extensions.into(),
+            },
+        ))
+    }
 }
 
 /// # References
@@ -52,24 +72,44 @@ pub struct CertificateEntry {
 ///
 /// ```text
 /// struct {
-///     select (certificate_type) {
-///         case RawPublicKey:
-///           /* From RFC 7250 ASN.1_subjectPublicKeyInfo */
-///           opaque ASN1_subjectPublicKeyInfo<1..2^24-1>;
-///
-///         case X509:
-///           opaque cert_data<1..2^24-1>;
-///     };
-///     Extension extensions<0..2^16-1>;
-/// } CertificateEntry;
-///
-/// struct {
 ///     opaque certificate_request_context<0..2^8-1>;
 ///     CertificateEntry certificate_list<0..2^24-1>;
 /// } Certificate;
 /// ```
-pub struct Certificate {
-    data: Vec<u8>,
+pub(crate) struct Certificate {
+    pub(crate) request_context: Vec<u8>,
+    pub(crate) certificate_list: Vec<CertificateEntry>,
+}
+
+impl Certificate {
+    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
+        let (b, request_context): (_, &[u8]) =
+            parse::vec8("Certificate certificate_request_context", b, 0, 1)?;
+        let (remain, mut certificate_list_data): (_, &[u8]) =
+            parse::vec24("Certificate certificate_list", b, 0, 1)?;
+
+        if !remain.is_empty() {
+            log::error!(
+                "Certificate contains {} bytes of data after certificate_list",
+                remain.len()
+            );
+            return Err(AlertDescription::DecodeError)?;
+        }
+
+        let mut certificate_list: Vec<CertificateEntry> = Vec::new();
+
+        while !certificate_list_data.is_empty() {
+            let (b, entry) = CertificateEntry::deser(certificate_list_data)?;
+            certificate_list_data = b;
+
+            certificate_list.push(entry);
+        }
+
+        Ok(Self {
+            request_context: request_context.into(),
+            certificate_list,
+        })
+    }
 }
 
 pub fn certificate_from_der(public_der: &[u8]) -> Result<Vec<u8>, AlertDescription> {
@@ -88,7 +128,7 @@ pub fn certificate_from_der(public_der: &[u8]) -> Result<Vec<u8>, AlertDescripti
     ret.extend_from_slice(&certificates_len.to_be_bytes()[1..]);
     ret.extend_from_slice(&data_len.to_be_bytes()[1..]);
     ret.extend_from_slice(public_der);
-    ret.extend_from_slice(&[0, 0]); // extensions length
+    ret.extend_from_slice(&0_u16.to_be_bytes()); // extensions length
 
     Ok(ret)
 }
@@ -105,9 +145,9 @@ pub fn certificate_from_der(public_der: &[u8]) -> Result<Vec<u8>, AlertDescripti
 /// } CertificateVerify;
 /// ```
 #[derive(Debug)]
-pub struct CertificateVerify {
-    algorithm: SignatureScheme,
-    signature: Vec<u8>,
+pub(crate) struct CertificateVerify {
+    pub(crate) algorithm: SignatureScheme,
+    pub(crate) signature: Vec<u8>,
 }
 
 impl CertificateVerify {
@@ -130,5 +170,28 @@ impl CertificateVerify {
         buf.extend_from_slice(&self.signature);
 
         buf
+    }
+
+    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
+        let (b, algorithm): (_, u16) = parse::u16("CertificateVerify.algorithm", b)?;
+        let (b, signature): (_, &[u8]) = parse::vec16("CertificateVerify.signature", b, 0, 1)?;
+
+        let algorithm: SignatureScheme = match SignatureScheme::try_from(algorithm) {
+            Ok(algorithm) => algorithm,
+            Err(e) => {
+                log::error!("CertificateVerify.algorithm value of {e:#04X} is invalid");
+                return Err(AlertDescription::IllegalParameter)?;
+            }
+        };
+
+        if !b.is_empty() {
+            log::error!("CertificateVerify contains {} extra bytes of data", b.len());
+            return Err(AlertDescription::DecodeError)?;
+        }
+
+        Ok(Self {
+            algorithm,
+            signature: signature.to_vec(),
+        })
     }
 }

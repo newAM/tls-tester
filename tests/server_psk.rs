@@ -34,7 +34,7 @@ fn monotonic_secs(start: Instant) -> u32 {
 #[test]
 fn test_server_psk() {
     stderrlog::new()
-        .verbosity(3)
+        .verbosity(4)
         .timestamp(stderrlog::Timestamp::Nanosecond)
         .init()
         .unwrap();

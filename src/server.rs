@@ -34,7 +34,7 @@ fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
     };
 
     if parsed.tag() != "CERTIFICATE" {
-        log::error!("Invalid PEM tag, expected CERTIFICATE");
+        log::error!("Invalid PEM tag, expected CERTIFICATE got {}", parsed.tag());
         return None;
     }
 

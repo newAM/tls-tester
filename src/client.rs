@@ -6,20 +6,25 @@ use crate::{
     cipher_suite::CipherSuite,
     error::TlsError,
     handshake::{
-        self, ClientHelloBuilder, HandshakeHeader, HandshakeType, NamedGroup, ServerHello,
-        extension,
+        self, Certificate, CertificateEntry, CertificateVerify, ClientHelloBuilder,
+        HandshakeHeader, HandshakeType, NamedGroup, ServerHello,
+        extension::{self, ServerName, signature_scheme::SignatureScheme},
     },
     key_schedule::KeySchedule,
     parse,
     record::{self, ContentType},
     tls_version::TlsVersion,
 };
-use sha2::digest::crypto_common::{generic_array::GenericArray, typenum::U32};
+use sha2::{
+    Digest as _,
+    digest::crypto_common::{generic_array::GenericArray, typenum::U32},
+};
 
 #[derive(Debug, Clone)]
 pub struct TlsClientBuilder {
     record_size_limit: u16,
     psks: Vec<Psk>,
+    server_name: Option<ServerName>,
 }
 
 impl Default for TlsClientBuilder {
@@ -34,7 +39,14 @@ impl TlsClientBuilder {
         Self {
             record_size_limit: extension::RecordSizeLimit::LIMIT_MAX,
             psks: Vec::new(),
+            server_name: None,
         }
+    }
+
+    #[must_use]
+    pub fn set_server_name(mut self, name: &str) -> Option<Self> {
+        self.server_name = Some(ServerName::from_str(name)?);
+        Some(self)
     }
 
     #[must_use]
@@ -59,7 +71,10 @@ impl TlsClientBuilder {
             record_size_limit: self.record_size_limit,
         };
 
-        let mut ret = TlsClientStream { base };
+        let mut ret = TlsClientStream {
+            base,
+            server_name: self.server_name,
+        };
 
         ret.handshake()?;
 
@@ -69,6 +84,7 @@ impl TlsClientBuilder {
 
 pub struct TlsClientStream {
     base: TlsStream,
+    pub(crate) server_name: Option<ServerName>,
 }
 
 impl TlsClientStream {
@@ -177,7 +193,7 @@ impl TlsClientStream {
         Ok(())
     }
 
-    fn read_certificate(&mut self) -> Result<(), TlsError> {
+    fn read_certificate(&mut self) -> Result<Certificate, TlsError> {
         let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
 
         if hs_hdr.msg_type() != HandshakeType::Certificate {
@@ -189,14 +205,47 @@ impl TlsClientStream {
             return Err(AlertDescription::UnexpectedMessage)?;
         }
 
-        let _data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
+        let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
 
         self.base.set_state(TlsState::WaitCertificateVerify);
+
+        Ok(Certificate::deser(&data)?)
+    }
+
+    fn handle_certificate(&mut self, certificate: &Certificate) -> Result<(), TlsError> {
+        log::error!("TODO: Client does not validate certificate chain against trust anchors");
+
+        let mut prev_entry: Option<&CertificateEntry> = None;
+        for entry in &certificate.certificate_list {
+            if prev_entry.is_none() {
+                if let Some(name) = &self.server_name {
+                    entry.data.validate(Some(name.name.as_str()))?;
+                } else {
+                    log::warn!("Ignoring certificate name validation")
+                }
+            } else {
+                entry.data.validate(None)?;
+            }
+
+            if let Some(prev_entry) = &prev_entry {
+                entry.data.verify_previous(
+                    &prev_entry.tbs_certificate,
+                    &prev_entry.data.signature_algorithm,
+                    &prev_entry.data.signature_value.bitstring,
+                )?;
+            }
+
+            prev_entry = Some(entry);
+
+            if !entry.extensions.is_empty() {
+                log::error!("TODO: Client handling of certificate entensions unimplemented");
+            }
+        }
 
         Ok(())
     }
 
-    fn read_certificate_verify(&mut self) -> Result<(), TlsError> {
+    fn read_certificate_verify(&mut self) -> Result<CertificateVerify, TlsError> {
         let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
 
         if hs_hdr.msg_type() != HandshakeType::CertificateVerify {
@@ -208,9 +257,55 @@ impl TlsClientStream {
             return Err(AlertDescription::UnexpectedMessage)?;
         }
 
-        let _data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
+        let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
 
         self.base.set_state(TlsState::WaitServerFinished);
+
+        Ok(CertificateVerify::deser(&data)?)
+    }
+
+    fn handle_certificate_verify(
+        &mut self,
+        certificate: &Certificate,
+        verify: &CertificateVerify,
+        tsh: &[u8],
+    ) -> Result<(), TlsError> {
+        if verify.algorithm != SignatureScheme::ecdsa_secp256r1_sha256 {
+            // TODO: implement required signature algorithms
+            log::error!(
+                "Client does not implement server's signature scheme: {:?}",
+                verify.algorithm
+            );
+            Err(AlertDescription::InternalError)?
+        }
+
+        // The signature is represented as a DER-encoded X690 ECDSA-Sig-Value structure.
+        //
+        // The digital signature is then computed over the concatenation of:
+        // -  A string that consists of octet 32 (0x20) repeated 64 times
+        // -  The context string ("TLS 1.3, server CertificateVerify" or "TLS 1.3, client CertificateVerify")
+        // -  A single 0 byte which serves as the separator
+        // -  The content to be signed (transcript hash)
+        let mut to_verify: Vec<u8> = vec![0x20; 64];
+        to_verify.extend_from_slice(b"TLS 1.3, server CertificateVerify\x00");
+        to_verify.extend_from_slice(tsh);
+
+        // end entity certificate is always the first
+        // https://datatracker.ietf.org/doc/html/rfc8446#section-4.4.2
+        let end_entity_certificate: &CertificateEntry = match certificate.certificate_list.first() {
+            Some(end_entity_cert) => end_entity_cert,
+            None => {
+                log::error!("Certificate.certificate_list is empty");
+                return Err(AlertDescription::DecodeError)?;
+            }
+        };
+
+        end_entity_certificate
+            .data
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key
+            .verify(&to_verify, &verify.signature)?;
 
         Ok(())
     }
@@ -284,7 +379,8 @@ impl TlsClientStream {
     fn handshake_alertable(&mut self) -> Result<(), TlsError> {
         let pub_key: [u8; 65] = self.base.key_schedule.new_secret_key();
 
-        let ch_build: ClientHelloBuilder = ClientHelloBuilder::new();
+        let ch_build: ClientHelloBuilder =
+            ClientHelloBuilder::new().set_server_name(self.server_name.clone());
         let data = ch_build.build(&pub_key);
         self.base
             .write_unencrypted_record(ContentType::Handshake, &data)?;
@@ -306,10 +402,12 @@ impl TlsClientStream {
         }
 
         self.read_encrypted_extensions()?;
-        self.read_certificate()?;
-        log::error!("TODO: Client handling of server certificate unimplemented");
-        self.read_certificate_verify()?;
-        log::error!("TODO: Client handling of server certificate verify unimplemented");
+        let certificate: Certificate = self.read_certificate()?;
+        self.handle_certificate(&certificate)?;
+
+        let tsh = self.base.key_schedule.transcript_hash().finalize();
+        let certificate_verify: CertificateVerify = self.read_certificate_verify()?;
+        self.handle_certificate_verify(&certificate, &certificate_verify, &tsh)?;
 
         self.read_server_finished()?;
         self.send_client_finished()?;

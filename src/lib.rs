@@ -11,6 +11,7 @@ pub(crate) mod parse;
 mod record;
 mod server;
 mod tls_version;
+mod x509;
 
 pub use alert::{Alert, AlertDescription, AlertLevel};
 pub use client::{TlsClientBuilder, TlsClientStream};
