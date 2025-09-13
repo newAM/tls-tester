@@ -23,6 +23,8 @@ fn main() {
     let mut tls_stream: TlsClientStream = TlsClientBuilder::new()
         .set_server_name(SERVER_NAME)
         .expect("Server name invalid")
+        .load_ca_bundle()
+        .expect("Failed to load system CA bundle")
         .handshake(tcp_stream)
         .expect("TLS handshake failed");
 

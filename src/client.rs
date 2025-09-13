@@ -1,4 +1,4 @@
-use std::{collections::VecDeque, io, net::TcpStream};
+use std::{collections::VecDeque, fs, io, net::TcpStream};
 
 use crate::{
     AlertDescription, Psk,
@@ -25,6 +25,8 @@ pub struct TlsClientBuilder {
     record_size_limit: u16,
     psks: Vec<Psk>,
     server_name: Option<ServerName>,
+    trusted_roots: Vec<crate::x509::Certificate>,
+    ignore_unknown_ca: bool,
 }
 
 impl Default for TlsClientBuilder {
@@ -40,6 +42,8 @@ impl TlsClientBuilder {
             record_size_limit: extension::RecordSizeLimit::LIMIT_MAX,
             psks: Vec::new(),
             server_name: None,
+            trusted_roots: Vec::new(),
+            ignore_unknown_ca: false,
         }
     }
 
@@ -61,6 +65,57 @@ impl TlsClientBuilder {
         self
     }
 
+    #[must_use]
+    pub fn load_ca_bundle(mut self) -> Option<Self> {
+        let ca_certificates: Vec<u8> = match fs::read("/etc/ssl/certs/ca-certificates.crt") {
+            Ok(cac) => cac,
+            Err(e) => {
+                log::error!("Failed to read certificates from system: {e:?}");
+                return None;
+            }
+        };
+
+        let certs = match pem::parse_many(&ca_certificates) {
+            Ok(c) => c,
+            Err(e) => {
+                log::error!("Failed to parse system certificates: {e:?}");
+                return None;
+            }
+        };
+
+        let mut n: usize = 0;
+
+        for cert in certs {
+            if cert.tag() != "CERTIFICATE" && cert.tag() != "TRUSTED CERTIFICATE" {
+                log::error!(
+                    "Invalid PEM tag, expected CERTIFICATE or TRUSTED CERTIFICATE got {}",
+                    cert.tag()
+                );
+                return None;
+            }
+
+            n = n.saturating_add(1);
+
+            let parsed_cert = match crate::x509::Certificate::deser(cert.contents(), true) {
+                Some((_, c)) => c,
+                None => {
+                    log::error!("Failed to parse this shit");
+                    continue;
+                }
+            };
+
+            self.trusted_roots.push(parsed_cert);
+        }
+
+        Some(self)
+    }
+
+    #[must_use]
+    pub fn ignore_unknown_ca(mut self, ignore_unknown_ca: bool) -> Self {
+        self.ignore_unknown_ca = ignore_unknown_ca;
+        self
+    }
+
     pub fn handshake(self, tcp_stream: TcpStream) -> Result<TlsClientStream, TlsError> {
         let base: TlsStream = TlsStream {
             stream: tcp_stream,
@@ -74,6 +129,8 @@ impl TlsClientBuilder {
         let mut ret = TlsClientStream {
             base,
             server_name: self.server_name,
+            trusted_roots: self.trusted_roots,
+            ignore_unknown_ca: self.ignore_unknown_ca,
         };
 
         ret.handshake()?;
@@ -85,6 +142,8 @@ impl TlsClientBuilder {
 pub struct TlsClientStream {
     base: TlsStream,
     pub(crate) server_name: Option<ServerName>,
+    pub(crate) trusted_roots: Vec<crate::x509::Certificate>,
+    ignore_unknown_ca: bool,
 }
 
 impl TlsClientStream {
@@ -213,8 +272,6 @@ impl TlsClientStream {
     }
 
     fn handle_certificate(&mut self, certificate: &Certificate) -> Result<(), TlsError> {
-        log::error!("TODO: Client does not validate certificate chain against trust anchors");
-
         let mut prev_entry: Option<&CertificateEntry> = None;
         for (n, entry) in certificate.certificate_list.iter().enumerate() {
             if prev_entry.is_none() {
@@ -245,6 +302,43 @@ impl TlsClientStream {
             if !entry.extensions.is_empty() {
                 log::error!("TODO: Client handling of certificate entensions unimplemented");
             }
+        }
+
+        if let Some(prev_entry) = &prev_entry {
+            log::debug!("Verifying last certificate entry with system trust anchors");
+
+            let prev_entry_issuer: String =
+                match prev_entry.data.tbs_certificate.issuer.common_name() {
+                    Some(cn) => cn,
+                    None => {
+                        log::error!("Last certificate in chain does not have an issuer");
+                        return Err(AlertDescription::BadCertificate)?;
+                    }
+                };
+
+            let mut validated: bool = false;
+
+            for root in &self.trusted_roots {
+                if root.tbs_certificate.issuer.common_name() == Some(prev_entry_issuer.clone()) {
+                    root.verify_previous(
+                        &prev_entry.tbs_certificate,
+                        &prev_entry.data.signature_algorithm,
+                        &prev_entry.data.signature_value.bitstring,
+                    )?;
+                    validated = true;
+                    break;
+                }
+            }
+
+            if !validated && !self.ignore_unknown_ca {
+                log::error!(
+                    "Failed to find certificate for issuer {prev_entry_issuer} in system trust anchors"
+                );
+                return Err(AlertDescription::UnknownCa)?;
+            }
+        } else {
+            log::error!("Server did not provide certificates in Certificate handshake message");
+            return Err(AlertDescription::BadCertificate)?;
         }
 
         Ok(())

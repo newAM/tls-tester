@@ -53,7 +53,7 @@ impl CertificateEntry {
         let (b, extensions): (_, &[u8]) = parse::vec16("CertificateEntry extensions", b, 0, 1)?;
 
         let (tbs_certificate_bytes, data): (&[u8], x509::Certificate) =
-            x509::Certificate::deser(data).ok_or(AlertDescription::BadCertificate)?;
+            x509::Certificate::deser(data, false).ok_or(AlertDescription::BadCertificate)?;
 
         Ok((
             b,

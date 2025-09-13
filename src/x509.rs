@@ -113,6 +113,8 @@ pub(crate) enum Tag {
     VisibleString,
     /// `GeneralString` tag: `27`.
     GeneralString,
+    /// `BMPString` tag: `28`.
+    UniversalString,
     /// `BMPString` tag: `30`.
     BmpString,
     /// Everything else.
@@ -143,6 +145,7 @@ impl From<Tag> for u8 {
             Tag::GeneralizedTime => 24,
             Tag::VisibleString => 26,
             Tag::GeneralString => 27,
+            Tag::UniversalString => 28,
             Tag::BmpString => 30,
             Tag::Unknown(other) => other,
         }
@@ -277,6 +280,7 @@ impl From<u8> for Identifier {
             24 => Tag::GeneralizedTime,
             26 => Tag::VisibleString,
             27 => Tag::GeneralString,
+            28 => Tag::UniversalString,
             30 => Tag::BmpString,
             other => Tag::Unknown(other),
         };
@@ -290,7 +294,7 @@ impl From<u8> for Identifier {
 /// # References
 ///
 /// - X.690 Section 8.1.1 Structure of an encoding
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Encoding {
     identifier: Identifier,
     content: Vec<u8>,
@@ -523,7 +527,7 @@ impl Encoding {
 // 2.5.4.10 is organizationName (printable string)
 // 2.5.4.6 countryName (printable string)
 // 2.5.4.3 commonName (printable string)
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) struct ObjectIdentifier {
     oid: Vec<u8>,
     repr: String,
@@ -641,7 +645,7 @@ mod object_identifier_tests {
 ///       utf8String              UTF8String (SIZE (1..MAX)),
 ///       bmpString               BMPString (SIZE (1..MAX)) }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AttributeTypeAndValue {
     oid: ObjectIdentifier,
     value: String,
@@ -650,7 +654,51 @@ pub(crate) struct AttributeTypeAndValue {
 impl AttributeTypeAndValue {
     pub fn deser<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Self)> {
         let (b, oid) = ObjectIdentifier::deser(&format!("{name}.type"), b)?;
-        let (b, value) = Encoding::deser_string(&format!("{name}.value"), b)?;
+        let value_name: String = format!("{name}.value");
+
+        let (b, encoding) = Encoding::deser(&value_name, b)?;
+
+        if encoding.identifier.class != Class::Universal {
+            log::error!(
+                "{name} expected identifier class {:?} got {:?}",
+                Class::Universal,
+                encoding.identifier.class
+            );
+            return None;
+        }
+
+        if encoding.identifier.pc != Pc::Primitive {
+            log::error!(
+                "{name} expected identifier pc {:?} got {:?}",
+                Pc::Primitive,
+                encoding.identifier.pc
+            );
+            return None;
+        }
+
+        let value: String = match encoding.identifier.tag {
+            Tag::Utf8String => match String::from_utf8(encoding.content) {
+                Ok(s) => s,
+                Err(e) => {
+                    log::error!("{name} is not a valid UTF-8 string: {e:?}");
+                    return None;
+                }
+            },
+            Tag::PrintableString | Tag::TeletexString => {
+                String::from_utf8_lossy(&encoding.content).to_string()
+            }
+            Tag::UniversalString => todo!(),
+            Tag::BmpString => todo!(),
+            // not in the spec but some CA's use it for DirectoryString anyway
+            Tag::Ia5String => {
+                log::warn!("{name} uses an unsupported tag Ia5String for DirectoryString");
+                String::from_utf8_lossy(&encoding.content).to_string()
+            }
+            tag => {
+                log::error!("{name} unsupported tag for DirectoryString: {tag:?}");
+                return None;
+            }
+        };
 
         Some((b, Self { oid, value }))
     }
@@ -669,7 +717,7 @@ impl AttributeTypeAndValue {
 /// RelativeDistinguishedName ::=
 ///   SET SIZE (1..MAX) OF AttributeTypeAndValue
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Name {
     rdn_sequence: Vec<AttributeTypeAndValue>,
 }
@@ -700,6 +748,17 @@ impl Name {
 
         Some((remain, Self { rdn_sequence }))
     }
+
+    /// Returns the commonName if present in the sequence
+    pub fn common_name(&self) -> Option<String> {
+        Some(
+            self.rdn_sequence
+                .iter()
+                .find(|atav| atav.oid.repr.as_str() == "2.5.4.3")?
+                .value
+                .clone(),
+        )
+    }
 }
 
 /// # References
@@ -711,7 +770,7 @@ impl Name {
 ///      notBefore      Time,
 ///      notAfter       Time }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Validity {
     not_before: Zoned,
     not_after: Zoned,
@@ -751,7 +810,7 @@ impl Validity {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum PublicKey {
     Prime256v1(p256::ecdsa::VerifyingKey),
     Secp384r1(p384::ecdsa::VerifyingKey),
@@ -856,7 +915,7 @@ impl PublicKey {
 ///      algorithm            AlgorithmIdentifier,
 ///      subjectPublicKey     BIT STRING  }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SubjectPublicKeyInfo {
     pub(crate) algorithm: AlgorithmIdentifier,
     pub(crate) subject_public_key: PublicKey,
@@ -985,7 +1044,7 @@ impl SubjectPublicKeyInfo {
 /// ```text
 /// Version  ::=  INTEGER  {  v1(0), v2(1), v3(2)  }
 /// ```
-#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Version {
     V1,
     V2,
@@ -1064,7 +1123,7 @@ impl Version {
 ///     nameAssigner            [0]     DirectoryString OPTIONAL,
 ///     partyName               [1]     DirectoryString }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum GeneralName {
     Rfc822Name(String),
     DnsName(String),
@@ -1087,12 +1146,13 @@ impl GeneralName {
             return None;
         }
         if encoding.identifier.pc != Pc::Primitive {
-            log::error!(
+            // warning instead of an error because a CA in my system trust store
+            // had it incorrectly set to constructed
+            log::warn!(
                 "{name} expected identifier PC {:?} got {:?}",
                 Pc::Primitive,
                 encoding.identifier.pc
             );
-            return None;
         }
 
         let tag_val: u8 = u8::from(encoding.identifier.tag);
@@ -1195,7 +1255,7 @@ impl GeneralName {
 ///
 /// GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SubjectAltName {
     names: Vec<GeneralName>,
 }
@@ -1240,6 +1300,38 @@ impl SubjectAltName {
 
 /// # References
 ///
+/// - [RFC 5280 Section 4.2.1.2](https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.1.2)
+///
+/// ```text
+/// id-ce-subjectKeyIdentifier OBJECT IDENTIFIER ::=  { id-ce 14 }
+///
+/// SubjectKeyIdentifier ::= KeyIdentifier
+///
+/// KeyIdentifier ::= OCTET STRING
+/// ```
+#[derive(Debug, Clone)]
+pub struct SubjectKeyIdentifier {
+    key_id: Vec<u8>,
+}
+
+impl SubjectKeyIdentifier {
+    pub fn deser(n: usize, b: &[u8]) -> Option<Self> {
+        let name = format!("Certificate.tbsCertificate.extensions[{n}].extnValue");
+
+        let (b, os) =
+            Encoding::deser_expected(Identifier::OCTETSTRING, &format!("{name}.KeyIdentifier"), b)?;
+
+        if !b.is_empty() {
+            log::error!("{name} contains {} bytes of extra data", b.len());
+            return None;
+        }
+
+        Some(Self { key_id: os.content })
+    }
+}
+
+/// # References
+///
 /// - [RFC 5280 Section 4.2.1.9](https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.1.9)
 ///
 /// ```text
@@ -1249,7 +1341,7 @@ impl SubjectAltName {
 ///     cA                      BOOLEAN DEFAULT FALSE,
 ///     pathLenConstraint       INTEGER (0..MAX) OPTIONAL }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct BasicConstraints {
     ca: bool,
     path_len_constraint: Option<Vec<u8>>,
@@ -1323,7 +1415,7 @@ impl BasicConstraints {
 ///      encipherOnly            (7),
 ///      decipherOnly            (8) }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct KeyUsage {
     usage: Vec<u8>,
 }
@@ -1349,11 +1441,13 @@ impl KeyUsage {
 /// # References
 ///
 /// - [RFC 5280 Section 4.2](https://datatracker.ietf.org/doc/html/rfc5280#section-4.2)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Extensions {
+    pub(crate) subject_key_identifier: Option<SubjectKeyIdentifier>,
     pub(crate) subject_alt_name: Option<SubjectAltName>,
     pub(crate) key_usage: Option<KeyUsage>,
     pub(crate) basic_constraints: Option<BasicConstraints>,
+
     unrecognized: Vec<Encoding>,
 }
 
@@ -1375,8 +1469,9 @@ impl Extensions {
 
         let mut b: &[u8] = &encoding.content;
 
-        let mut subject_alt_name: Option<SubjectAltName> = None;
+        let mut subject_key_identifier: Option<SubjectKeyIdentifier> = None;
         let mut key_usage: Option<KeyUsage> = None;
+        let mut subject_alt_name: Option<SubjectAltName> = None;
         let mut basic_constraints: Option<BasicConstraints> = None;
         let mut unrecognized: Vec<Encoding> = Vec::new();
 
@@ -1431,6 +1526,18 @@ impl Extensions {
             };
 
             match ext_obj_id.repr.as_str() {
+                // SubjectKeyIdentifier
+                "2.5.29.14" => {
+                    if subject_key_identifier
+                        .replace(SubjectKeyIdentifier::deser(n, &octetstring)?)
+                        .is_some()
+                    {
+                        log::error!(
+                            "Certificate.tbsCertificate.extensions[{n}] is a duplicate SubjectKeyIdentifier extension"
+                        );
+                        return None;
+                    }
+                }
                 // keyUsage
                 "2.5.29.15" => {
                     if key_usage
@@ -1487,6 +1594,7 @@ impl Extensions {
         }
 
         Some(Self {
+            subject_key_identifier,
             subject_alt_name,
             key_usage,
             basic_constraints,
@@ -1516,6 +1624,7 @@ impl Extensions {
 ///                           -- If present, version MUST be v3
 ///      }
 /// ```
+#[derive(Clone)]
 pub(crate) struct TbsCertificate {
     pub(crate) version: Version,
     pub(crate) serial_number: Vec<u8>,
@@ -1629,7 +1738,7 @@ impl TbsCertificate {
 ///     algorithm               OBJECT IDENTIFIER,
 ///     parameters              ANY DEFINED BY algorithm OPTIONAL  }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct AlgorithmIdentifier {
     algorithm: ObjectIdentifier,
     parameters: Option<ObjectIdentifier>,
@@ -1670,7 +1779,7 @@ impl AlgorithmIdentifier {
 /// # References
 ///
 /// - [RFC 5280 Section 4.1.1.3](https://datatracker.ietf.org/doc/html/rfc5280#section-4.1.1.3)
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct SignatureValue {
     pub(crate) bitstring: Vec<u8>,
 }
@@ -1699,7 +1808,7 @@ impl SignatureValue {
 ///     signatureAlgorithm   AlgorithmIdentifier,
 ///     signatureValue       BIT STRING  }
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct Certificate {
     pub(crate) tbs_certificate: TbsCertificate,
     pub(crate) signature_algorithm: AlgorithmIdentifier,
@@ -1707,12 +1816,12 @@ pub(crate) struct Certificate {
 }
 
 impl Certificate {
-    pub fn deser(buf: &[u8]) -> Option<(&[u8], Self)> {
+    pub fn deser(buf: &[u8], ignore_extra: bool) -> Option<(&[u8], Self)> {
         let init_len: usize = buf.len();
 
         let (b, certificate) = Encoding::deser_expected(Identifier::SEQUENCE, "Certificate", buf)?;
 
-        if !b.is_empty() {
+        if !b.is_empty() && !ignore_extra {
             log::error!(
                 "Certificate contains {} bytes of data after sequence encoding",
                 b.len()
@@ -1864,6 +1973,12 @@ impl Certificate {
                 // TODO: this extension is marked as critical
                 log::error!(
                     "Certificate.tbsCertificate.extensions contains unimplemented BasicConstraints extension {basic_constraints:?}"
+                );
+            }
+
+            if let Some(subject_key_identifier) = &extensions.subject_key_identifier {
+                log::warn!(
+                    "Certificate.tbsCertificate.extensions contains unimplemented SubjectKeyIdentifier extension {subject_key_identifier:02x?}"
                 );
             }
         }

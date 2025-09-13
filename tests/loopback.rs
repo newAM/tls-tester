@@ -50,6 +50,7 @@ fn test_loopback() {
 
     log::info!("Handshaking");
     let mut tls_stream: TlsClientStream = TlsClientBuilder::new()
+        .ignore_unknown_ca(true)
         .handshake(tcp_stream)
         .expect("TLS handshake failed");
 
