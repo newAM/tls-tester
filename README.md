@@ -34,8 +34,10 @@ A tool for testing [TLS 1.3] implementation compliance.
     - `TLS_CHACHA20_POLY1305_SHA256`
   - Does not implement all recommended key exchange algorithms, missing:
     - `X25519`
+- Client ignores server `EncryptedExtensions`
+- Client ignores TLS certificate extensions
+- Certificate parsing is messy and contains many outstanding TODOs
 - PSK does not support `psk_ke`, only `psk_dhe_ke` is supported
-- Run `grep -rni todo` in the repository for more minor limitations
 
 ## Available tests
 
