@@ -171,15 +171,15 @@ impl ClientHelloBuilder {
         );
         extensions.extend_from_slice(&key_share);
 
-        let supported_grups: Vec<u8> = ser_named_group_list();
+        let supported_groups: Vec<u8> = ser_named_group_list();
         extensions.extend_from_slice(ExtensionType::SupportedGroups.to_be_bytes().as_ref());
         extensions.extend_from_slice(
-            u16::try_from(supported_grups.len())
+            u16::try_from(supported_groups.len())
                 .unwrap()
                 .to_be_bytes()
                 .as_ref(),
         );
-        extensions.extend_from_slice(&supported_grups);
+        extensions.extend_from_slice(&supported_groups);
 
         let signature_algorithms: Vec<u8> = ser_signature_scheme_list();
         extensions.extend_from_slice(ExtensionType::SignatureAlgorithms.to_be_bytes().as_ref());
