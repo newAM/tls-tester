@@ -2,8 +2,9 @@ use crate::{alert::AlertDescription, parse};
 
 /// # References
 ///
-/// * [RFC 8446 Section 4.2.7](https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.7)
-/// * [RFC 8446 Section 9.1](https://datatracker.ietf.org/doc/html/rfc8446#section-9.1)
+/// - [RFC 8446 Section 4.2.7](https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.7)
+/// - [RFC 8446 Section 9.1](https://datatracker.ietf.org/doc/html/rfc8446#section-9.1)
+/// - [draft-ietf-tls-ecdhe-mlkem-00](https://datatracker.ietf.org/doc/draft-ietf-tls-ecdhe-mlkem/)
 #[repr(u16)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +22,10 @@ pub(crate) enum NamedGroup {
     ffdhe4096 = 0x0102,
     ffdhe6144 = 0x0103,
     ffdhe8192 = 0x0104,
+    // Post-quantum hybrid
+    SecP256r1MLKEM768 = 0x11EB,
+    X25519MLKEM768 = 0x11EC,
+    SecP384r1MLKEM1024 = 0x11ED,
     // Reserved Code Points
     // ffdhe_private_use(0x01FC..0x01FF),
     // ecdhe_private_use(0xFE00..0xFEFF),
@@ -59,6 +64,9 @@ impl TryFrom<u16> for NamedGroup {
             x if x == (Self::ffdhe4096 as u16) => Ok(Self::ffdhe4096),
             x if x == (Self::ffdhe6144 as u16) => Ok(Self::ffdhe6144),
             x if x == (Self::ffdhe8192 as u16) => Ok(Self::ffdhe8192),
+            x if x == (Self::SecP256r1MLKEM768 as u16) => Ok(Self::SecP256r1MLKEM768),
+            x if x == (Self::X25519MLKEM768 as u16) => Ok(Self::X25519MLKEM768),
+            x if x == (Self::SecP384r1MLKEM1024 as u16) => Ok(Self::SecP384r1MLKEM1024),
             x => Err(x),
         }
     }
@@ -84,8 +92,11 @@ pub(crate) fn deser_named_group_list(b: &[u8]) -> Result<Vec<NamedGroup>, AlertD
         match NamedGroup::try_from(group) {
             Ok(n) => ret.push(n),
             Err(e) => {
-                log::error!("Unknown NamedGroup value 0x{e:04x}");
-                return Err(AlertDescription::IllegalParameter);
+                // https://datatracker.ietf.org/doc/html/rfc8446#section-9.3
+                // A server receiving a ClientHello MUST correctly ignore all
+                // unrecognized cipher suites, extensions, and other parameters.
+                // Otherwise, it may fail to interoperate with newer clients.
+                log::warn!("Unknown NamedGroup value 0x{e:04x}");
             }
         }
     }
