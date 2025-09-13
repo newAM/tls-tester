@@ -7,9 +7,14 @@
 // https://lapo.it/asn1js/#MIIBfTCCASOgAwIBAgIUC8omRPq3ArTh5TMajfWXhSgn8jEwCgYIKoZIzj0EAwIwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTI1MDgzMDIxMjExM1oXDTM1MDgyODIxMjExM1owFDESMBAGA1UEAwwJbG9jYWxob3N0MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEzfoCZVZzX15nttNicIoP6Z5XqCbw_0YW-jrV0ubU9KW6Ul7ttvx5yy0hw9_ykzZHPfAbP5vSbzgXQ1C3Ni-NBaNTMFEwHQYDVR0OBBYEFNx6TDo0jekr5UpvOZweKNCN0fjjMB8GA1UdIwQYMBaAFNx6TDo0jekr5UpvOZweKNCN0fjjMA8GA1UdEwEB_wQFMAMBAf8wCgYIKoZIzj0EAwIDSAAwRQIhAIXRACeQSoJxDWt1aMX2ngI35Lk_E1L6fddABTGNrHouAiBZEjwxUu9D15OOHzpGeXxXtngSG1cFLXg1CDZsAHsXog
 // 3082017d30820123a00302010202140bca2644fab702b4e1e5331a8df597852827f231300a06082a8648ce3d04030230143112301006035504030c096c6f63616c686f7374301e170d3235303833303231323131335a170d3335303832383231323131335a30143112301006035504030c096c6f63616c686f73743059301306072a8648ce3d020106082a8648ce3d03010703420004cdfa026556735f5e67b6d362708a0fe99e57a826f0ff4616fa3ad5d2e6d4f4a5ba525eedb6fc79cb2d21c3dff29336473df01b3f9bd26f38174350b7362f8d05a3533051301d0603551d0e04160414dc7a4c3a348de92be54a6f399c1e28d08dd1f8e3301f0603551d23041830168014dc7a4c3a348de92be54a6f399c1e28d08dd1f8e3300f0603551d130101ff040530030101ff300a06082a8648ce3d040302034800304502210085d10027904a82710d6b7568c5f69e0237e4b93f1352fa7dd74005318dac7a2e022059123c3152ef43d7938e1f3a46797c57b678121b57052d783508366c007b17a2
 
-use p256::ecdsa::signature::{Verifier, hazmat::PrehashVerifier};
+use p256::ecdsa::signature::Verifier as _;
+use rsa::{pkcs1::DecodeRsaPublicKey as _, pkcs8::AssociatedOid};
 use sha2::Digest;
-use std::{fmt, ops::Add};
+use std::{
+    fmt,
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+    ops::Add,
+};
 
 use jiff::{Zoned, civil::DateTime, tz::TimeZone};
 
@@ -20,7 +25,7 @@ use crate::{AlertDescription, parse};
 /// # References
 ///
 /// - X.690 Section 8.1.2.2
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Class {
     Universal = 0b00,
     Application = 0b01,
@@ -216,6 +221,18 @@ impl Identifier {
         pc: Pc::Primitive,
         tag: Tag::Null,
     };
+
+    pub const OCTETSTRING: Self = Self {
+        class: Class::Universal,
+        pc: Pc::Primitive,
+        tag: Tag::OctetString,
+    };
+
+    pub const BOOLEAN: Self = Self {
+        class: Class::Universal,
+        pc: Pc::Primitive,
+        tag: Tag::Boolean,
+    };
 }
 
 impl From<u8> for Identifier {
@@ -344,6 +361,29 @@ impl Encoding {
                 content: content.into(),
             },
         ))
+    }
+
+    pub fn deser_bool<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], bool)> {
+        let (b, encoding) = Self::deser_expected(Identifier::BOOLEAN, name, b)?;
+
+        let val: bool = Self::deser_bool_from_encoding(encoding, name)?;
+
+        Some((b, val))
+    }
+
+    pub fn deser_bool_from_encoding(encoding: Encoding, name: &str) -> Option<bool> {
+        match encoding.content.first() {
+            Some(0x00) => Some(false),
+            Some(0xFF) => Some(true),
+            Some(val) => {
+                log::error!("{name} boolean value invalid, expected 0x00 or 0xFF, got 0x{val:02x}");
+                None
+            }
+            None => {
+                log::error!("{name} boolean is missing a value byte");
+                None
+            }
+        }
     }
 
     pub fn deser_expected<'a>(
@@ -715,28 +755,19 @@ impl Validity {
 pub enum PublicKey {
     Prime256v1(p256::ecdsa::VerifyingKey),
     Secp384r1(p384::ecdsa::VerifyingKey),
+    Rsa(rsa::RsaPublicKey),
 }
 
 impl PublicKey {
-    pub fn verify(&self, to_verify: &[u8], signature: &[u8]) -> Result<(), AlertDescription> {
-        self.verify_inner(false, to_verify, signature)
-    }
-
-    pub fn verify_prehash(
+    pub(crate) fn verify<D>(
         &self,
         to_verify: &[u8],
         signature: &[u8],
-    ) -> Result<(), AlertDescription> {
-        self.verify_inner(true, to_verify, signature)
-    }
-
-    fn verify_inner(
-        &self,
-        prehash: bool,
-        to_verify: &[u8],
-        signature: &[u8],
-    ) -> Result<(), AlertDescription> {
-        match self {
+    ) -> Result<(), AlertDescription>
+    where
+        D: Digest + AssociatedOid,
+    {
+        let is_ok: bool = match self {
             PublicKey::Prime256v1(verifying_key) => {
                 let signature: p256::ecdsa::Signature =
                     match p256::ecdsa::Signature::from_der(signature) {
@@ -749,19 +780,13 @@ impl PublicKey {
                         }
                     };
 
-                let result = if prehash {
-                    verifying_key.verify_prehash(to_verify, &signature)
-                } else {
-                    verifying_key.verify(to_verify, &signature)
-                };
+                let result = verifying_key.verify(to_verify, &signature);
 
                 if let Err(e) = result {
-                    log::error!("Certificate verification failed: {e:?}");
-                    // RFC 8446 4.4.3 If the verification fails, the receiver MUST
-                    // terminate the handshake with a "decrypt_error" alert.
-                    Err(AlertDescription::DecryptError)?
+                    log::error!("Verification of certificate prime256v1 signature failed: {e:?}");
+                    false
                 } else {
-                    Ok(())
+                    true
                 }
             }
             PublicKey::Secp384r1(verifying_key) => {
@@ -776,21 +801,48 @@ impl PublicKey {
                         }
                     };
 
-                let result = if prehash {
-                    verifying_key.verify_prehash(to_verify, &signature)
-                } else {
-                    verifying_key.verify(to_verify, &signature)
-                };
+                let result = verifying_key.verify(to_verify, &signature);
 
                 if let Err(e) = result {
-                    log::error!("Certificate verification failed: {e:?}");
-                    // RFC 8446 4.4.3 If the verification fails, the receiver MUST
-                    // terminate the handshake with a "decrypt_error" alert.
-                    Err(AlertDescription::DecryptError)?
+                    log::error!("Verification of certificate secp384r1 signature failed: {e:?}");
+                    false
                 } else {
-                    Ok(())
+                    true
                 }
             }
+            PublicKey::Rsa(public_key) => {
+                let signature: rsa::pkcs1v15::Signature = match rsa::pkcs1v15::Signature::try_from(
+                    signature,
+                ) {
+                    Ok(signature) => signature,
+                    Err(e) => {
+                        log::error!(
+                            "Certificate signature format does not match RSA PKCS #1 v1.5: {e:?}"
+                        );
+                        return Err(AlertDescription::BadCertificate)?;
+                    }
+                };
+
+                let verifying_key: rsa::pkcs1v15::VerifyingKey<D> =
+                    rsa::pkcs1v15::VerifyingKey::new(public_key.clone());
+
+                let result = verifying_key.verify(to_verify, &signature);
+
+                if let Err(e) = result {
+                    log::error!("Verification of certificate RSA signature failed: {e:?}");
+                    false
+                } else {
+                    true
+                }
+            }
+        };
+
+        if is_ok {
+            Ok(())
+        } else {
+            // RFC 8446 4.4.3 If the verification fails, the receiver MUST
+            // terminate the handshake with a "decrypt_error" alert.
+            Err(AlertDescription::DecryptError)
         }
     }
 }
@@ -831,7 +883,9 @@ impl SubjectPublicKeyInfo {
         let pub_key_bytes = match subject_public_key.content.get(1..) {
             Some(bytes) => bytes,
             _ => {
-                log::error!("Certificate public key contains no data");
+                log::error!(
+                    "Certificate.tbsCertificate.subjectPublicKeyInfo.subjectPublicKey contains no data"
+                );
                 return None;
             }
         };
@@ -873,17 +927,30 @@ impl SubjectPublicKeyInfo {
                         }
                     }
                 } else {
-                    log::error!("Expected parameters with ecPublicKey algorithm");
+                    log::error!(
+                        "Certificate.tbsCertificate.subjectPublicKeyInfo.algorithm.parameters is missing, required with ecPublicKey algorithm"
+                    );
                     return None;
                 }
             }
             // rsaEncryption (PKCS #1)
             "1.2.840.113549.1.1.1" => {
-                // TODO: required for compliance
-                log::error!(
-                    "Certificate.tbsCertificate.SubjectPublicKeyInfo.algorithm.algorithm uses an unimplemented algorithm, rsaEncryption"
-                );
-                return None;
+                if algorithm.parameters.is_some() {
+                    log::error!(
+                        "Certificate.tbsCertificate.subjectPublicKeyInfo.algorithm.parameters is present, unexpected for RSA encryption"
+                    );
+                    return None;
+                }
+
+                match rsa::RsaPublicKey::from_pkcs1_der(pub_key_bytes) {
+                    Ok(pk) => PublicKey::Rsa(pk),
+                    Err(e) => {
+                        log::error!(
+                            "Certificate.tbsCertificate.subjectPublicKeyInfo.subjectPublicKey is not a valid RSA public key: {e:?}"
+                        );
+                        return None;
+                    }
+                }
             }
             oid => {
                 log::error!(
@@ -975,11 +1042,319 @@ impl Version {
 
 /// # References
 ///
+/// - [RFC 5280 Section 4.2.1.6](https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.1.6)
+///
+/// ```text
+/// GeneralName ::= CHOICE {
+///     otherName                       [0]     OtherName,
+///     rfc822Name                      [1]     IA5String,
+///     dNSName                         [2]     IA5String,
+///     x400Address                     [3]     ORAddress,
+///     directoryName                   [4]     Name,
+///     ediPartyName                    [5]     EDIPartyName,
+///     uniformResourceIdentifier       [6]     IA5String,
+///     iPAddress                       [7]     OCTET STRING,
+///     registeredID                    [8]     OBJECT IDENTIFIER }
+///
+/// OtherName ::= SEQUENCE {
+///     type-id    OBJECT IDENTIFIER,
+///     value      [0] EXPLICIT ANY DEFINED BY type-id }
+///
+/// EDIPartyName ::= SEQUENCE {
+///     nameAssigner            [0]     DirectoryString OPTIONAL,
+///     partyName               [1]     DirectoryString }
+/// ```
+#[derive(Debug)]
+pub enum GeneralName {
+    Rfc822Name(String),
+    DnsName(String),
+    IpAddr(IpAddr),
+    UniformResourceIdentifier(String),
+    Unimplemented(Vec<u8>),
+    Unrecognized(Vec<u8>),
+}
+
+impl GeneralName {
+    pub fn deser<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Self)> {
+        let (b, encoding) = Encoding::deser(name, b)?;
+
+        if encoding.identifier.class != Class::Application {
+            log::error!(
+                "{name} expected identifier class {:?} got {:?}",
+                Class::Application,
+                encoding.identifier.class
+            );
+            return None;
+        }
+        if encoding.identifier.pc != Pc::Primitive {
+            log::error!(
+                "{name} expected identifier PC {:?} got {:?}",
+                Pc::Primitive,
+                encoding.identifier.pc
+            );
+            return None;
+        }
+
+        let tag_val: u8 = u8::from(encoding.identifier.tag);
+
+        let ret: Self = match tag_val {
+            0 => {
+                // TODO: implement AnotherName type
+                log::warn!("{name} ignoring unimplemented GeneralName type AnotherName");
+                Self::Unimplemented(encoding.content)
+            }
+            1 => {
+                let val = String::from_utf8_lossy(&encoding.content);
+                if !val.is_ascii() {
+                    log::error!("{name} rfc822Name is not a valid IA5String (ASCII)");
+                    return None;
+                }
+                Self::Rfc822Name(val.into())
+            }
+            2 => {
+                let val = String::from_utf8_lossy(&encoding.content);
+                if !val.is_ascii() {
+                    log::error!("{name} dNSName is not a valid IA5String (ASCII)");
+                    return None;
+                }
+                Self::DnsName(val.into())
+            }
+            3 => {
+                // TODO: implement ORAddress type
+                log::warn!("{name} ignoring unimplemented GeneralName type ORAddress");
+                Self::Unimplemented(encoding.content)
+            }
+            4 => {
+                // TODO: implement Name type
+                log::warn!("{name} ignoring unimplemented GeneralName type Name");
+                Self::Unimplemented(encoding.content)
+            }
+            5 => {
+                // TODO: implement EDIPartyName type
+                log::warn!("{name} ignoring unimplemented GeneralName type EDIPartyName");
+                Self::Unimplemented(encoding.content)
+            }
+            6 => {
+                let val = String::from_utf8_lossy(&encoding.content);
+                if !val.is_ascii() {
+                    log::error!(
+                        "{name} uniformResourceIdentifier is not a valid IA5String (ASCII)"
+                    );
+                    return None;
+                }
+                Self::UniformResourceIdentifier(val.into())
+            }
+            7 => {
+                if encoding.content.len() == 4 {
+                    Self::IpAddr(IpAddr::V4(Ipv4Addr::from_bits(u32::from_be_bytes(
+                        encoding.content.try_into().unwrap(),
+                    ))))
+                } else if encoding.content.len() == 16 {
+                    Self::IpAddr(IpAddr::V6(Ipv6Addr::from_bits(u128::from_be_bytes(
+                        encoding.content.try_into().unwrap(),
+                    ))))
+                } else {
+                    log::error!(
+                        "{name} contains an unrecoginzed IP address length {} expected 4 for IPv4 or 16 for IPv6",
+                        encoding.content.len()
+                    );
+                    return None;
+                }
+            }
+            8 => {
+                // TODO: implement EDIPartyName type
+                log::warn!("{name} ignoring unimplemented GeneralName type registeredID");
+                Self::Unimplemented(encoding.content)
+            }
+            unrecognized => {
+                log::warn!("{name} ignoring unrecognized GeneralName type 0x{unrecognized:02x}");
+                Self::Unrecognized(encoding.content)
+            }
+        };
+
+        Some((b, ret))
+    }
+
+    /// Returns `true` if the general name is [`DnsName`].
+    ///
+    /// [`DnsName`]: GeneralName::DnsName
+    #[must_use]
+    pub fn is_dns_name(&self) -> bool {
+        matches!(self, Self::DnsName(..))
+    }
+}
+
+/// # References
+///
+/// - [RFC 5280 Section 4.2.1.6](https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.1.6)
+///
+/// ```text
+/// id-ce-subjectAltName OBJECT IDENTIFIER ::=  { id-ce 17 }
+///
+/// SubjectAltName ::= GeneralNames
+///
+/// GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName
+/// ```
+#[derive(Debug)]
+pub struct SubjectAltName {
+    names: Vec<GeneralName>,
+}
+
+impl SubjectAltName {
+    pub fn deser(n: usize, b: &[u8]) -> Option<Self> {
+        let name = format!("Certificate.tbsCertificate.extensions[{n}].extnValue");
+
+        let (b, seq) =
+            Encoding::deser_expected(Identifier::SEQUENCE, &format!("{name}.GeneralNames"), b)?;
+
+        let mut seq_b: &[u8] = seq.content.as_ref();
+
+        let mut names: Vec<GeneralName> = Vec::new();
+
+        while !seq_b.is_empty() {
+            let name_name = format!("{name}.GeneralNames[{}]", names.len());
+            let (local_b, general_name) = GeneralName::deser(&name_name, seq_b)?;
+            seq_b = local_b;
+
+            names.push(general_name);
+        }
+
+        if !b.is_empty() {
+            log::error!("{name} contains {} bytes of extra data", b.len());
+            return None;
+        }
+
+        Some(Self { names })
+    }
+
+    pub fn dns_names(&self) -> Vec<String> {
+        self.names
+            .iter()
+            .filter_map(|general_name| match general_name {
+                GeneralName::DnsName(dns_name) => Some(dns_name.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+}
+
+/// # References
+///
+/// - [RFC 5280 Section 4.2.1.9](https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.1.9)
+///
+/// ```text
+/// id-ce-basicConstraints OBJECT IDENTIFIER ::=  { id-ce 19 }
+///
+/// BasicConstraints ::= SEQUENCE {
+///     cA                      BOOLEAN DEFAULT FALSE,
+///     pathLenConstraint       INTEGER (0..MAX) OPTIONAL }
+/// ```
+#[derive(Debug)]
+pub struct BasicConstraints {
+    ca: bool,
+    path_len_constraint: Option<Vec<u8>>,
+}
+
+impl BasicConstraints {
+    pub fn deser(n: usize, b: &[u8]) -> Option<Self> {
+        let name = format!("Certificate.tbsCertificate.extensions[{n}].extnValue");
+
+        let (b, encoding) =
+            Encoding::deser_expected(Identifier::SEQUENCE, &format!("{name}.BasicConstraints"), b)?;
+
+        if !b.is_empty() {
+            log::error!("{name} contains {} bytes of extra data", b.len());
+            return None;
+        }
+
+        if encoding.content.is_empty() {
+            Some(Self {
+                ca: false,
+                path_len_constraint: None,
+            })
+        } else {
+            let (seq_b, ca) =
+                Encoding::deser_bool(&format!("{name}.BasicConstraints.cA"), &encoding.content)?;
+
+            let path_len_constraint = if !seq_b.is_empty() {
+                let (b, path_len_constraint) = Encoding::deser_expected(
+                    Identifier::INTEGER,
+                    &format!("{name}.BasicConstraints.pathLenConstraint"),
+                    seq_b,
+                )?;
+
+                if !b.is_empty() {
+                    log::error!(
+                        "{name}.BasicConstraints contains {} bytes of extra data",
+                        b.len()
+                    );
+                    return None;
+                }
+
+                Some(path_len_constraint.content)
+            } else {
+                None
+            };
+
+            Some(Self {
+                ca,
+                path_len_constraint,
+            })
+        }
+    }
+}
+
+/// # References
+///
+/// - [RFC 5280 Section 4.2.1.3](https://datatracker.ietf.org/doc/html/rfc5280#section-4.2.1.3)
+///
+/// ```text
+/// id-ce-keyUsage OBJECT IDENTIFIER ::=  { id-ce 15 }
+///
+/// KeyUsage ::= BIT STRING {
+///      digitalSignature        (0),
+///      nonRepudiation          (1), -- recent editions of X.509 have
+///                           -- renamed this bit to contentCommitment
+///      keyEncipherment         (2),
+///      dataEncipherment        (3),
+///      keyAgreement            (4),
+///      keyCertSign             (5),
+///      cRLSign                 (6),
+///      encipherOnly            (7),
+///      decipherOnly            (8) }
+/// ```
+#[derive(Debug)]
+pub struct KeyUsage {
+    usage: Vec<u8>,
+}
+
+impl KeyUsage {
+    pub fn deser(n: usize, b: &[u8]) -> Option<Self> {
+        let name = format!("Certificate.tbsCertificate.extensions[{n}].extnValue");
+
+        let (b, encoding) =
+            Encoding::deser_expected(Identifier::BITSTRING, &format!("{name}.KeyUsage"), b)?;
+
+        if !b.is_empty() {
+            log::error!("{name} contains {} bytes of extra data", b.len());
+            return None;
+        }
+
+        Some(Self {
+            usage: encoding.content,
+        })
+    }
+}
+
+/// # References
+///
 /// - [RFC 5280 Section 4.2](https://datatracker.ietf.org/doc/html/rfc5280#section-4.2)
 #[derive(Debug)]
 pub(crate) struct Extensions {
-    // TODO: furthur decoding
-    encodings: Vec<Encoding>,
+    pub(crate) subject_alt_name: Option<SubjectAltName>,
+    pub(crate) key_usage: Option<KeyUsage>,
+    pub(crate) basic_constraints: Option<BasicConstraints>,
+    unrecognized: Vec<Encoding>,
 }
 
 impl Extensions {
@@ -1000,17 +1375,123 @@ impl Extensions {
 
         let mut b: &[u8] = &encoding.content;
 
-        let mut encodings: Vec<Encoding> = Vec::new();
+        let mut subject_alt_name: Option<SubjectAltName> = None;
+        let mut key_usage: Option<KeyUsage> = None;
+        let mut basic_constraints: Option<BasicConstraints> = None;
+        let mut unrecognized: Vec<Encoding> = Vec::new();
+
+        let mut n: usize = 0;
 
         while !b.is_empty() {
-            let (local_b, encoding) =
-                Encoding::deser("Certificate.tbsCertificate.extensions.?", b)?;
+            let (local_b, encoding) = Encoding::deser_expected(
+                Identifier::SEQUENCE,
+                format!("Certificate.tbsCertificate.extensions[{n}]").as_str(),
+                b,
+            )?;
             b = local_b;
 
-            encodings.push(encoding);
+            let (ext_remain, ext_obj_id) = ObjectIdentifier::deser(
+                format!("Certificate.tbsCertificate.extensions[{n}].extnID").as_str(),
+                &encoding.content,
+            )?;
+
+            let (ext_remain, maybe_bool) = Encoding::deser_expected2(
+                Identifier::BOOLEAN,
+                Identifier::OCTETSTRING,
+                format!("Certificate.tbsCertificate.extensions[{n}].critical_or_extnValue")
+                    .as_str(),
+                ext_remain,
+            )?;
+
+            let (critical, octetstring): (bool, Vec<u8>) = if maybe_bool.identifier
+                == Identifier::BOOLEAN
+            {
+                let (remain, octetstring_encoding) = Encoding::deser_expected(
+                    Identifier::OCTETSTRING,
+                    format!("Certificate.tbsCertificate.extensions[{n}].extnValue").as_str(),
+                    ext_remain,
+                )?;
+
+                if !remain.is_empty() {
+                    log::error!(
+                        "Certificate.tbsCertificate.extensions[{n}] contains {} bytes of extra data",
+                        remain.len()
+                    );
+                    return None;
+                }
+
+                let critical: bool = Encoding::deser_bool_from_encoding(
+                    maybe_bool,
+                    &format!("Certificate.tbsCertificate.extensions[{n}].critical"),
+                )?;
+
+                (critical, octetstring_encoding.content)
+            } else {
+                (false, maybe_bool.content)
+            };
+
+            match ext_obj_id.repr.as_str() {
+                // keyUsage
+                "2.5.29.15" => {
+                    if key_usage
+                        .replace(KeyUsage::deser(n, &octetstring)?)
+                        .is_some()
+                    {
+                        log::error!(
+                            "Certificate.tbsCertificate.extensions[{n}] is a duplicate KeyUsage extension"
+                        );
+                        return None;
+                    }
+                }
+                // subjectAltName
+                "2.5.29.17" => {
+                    if subject_alt_name
+                        .replace(SubjectAltName::deser(n, &octetstring)?)
+                        .is_some()
+                    {
+                        log::error!(
+                            "Certificate.tbsCertificate.extensions[{n}] is a duplicate SubjectAltName extension"
+                        );
+                        return None;
+                    }
+                }
+                // basicConstraints
+                "2.5.29.19" => {
+                    if basic_constraints
+                        .replace(BasicConstraints::deser(n, &octetstring)?)
+                        .is_some()
+                    {
+                        log::error!(
+                            "Certificate.tbsCertificate.extensions[{n}] is a duplicate BasicConstraints extension"
+                        );
+                        return None;
+                    }
+                }
+                unrecognized_oid => {
+                    if critical {
+                        log::error!(
+                            "Certificate.tbsCertificate.extensions[{n}] unrecognized OID {unrecognized_oid} with critical bit set ignored",
+                        );
+                        // TODO: bail here
+                    } else {
+                        log::warn!(
+                            "Certificate.tbsCertificate.extensions[{n}] unrecognized OID {unrecognized_oid} ignored",
+                        );
+                    }
+
+                    unrecognized.push(encoding);
+                }
+            }
+
+            n = n.saturating_add(1);
         }
 
-        Some(Self { encodings })
+        Some(Self {
+            subject_alt_name,
+            key_usage,
+            basic_constraints,
+            unrecognized,
+        })
     }
 }
 
@@ -1345,7 +1826,7 @@ impl Certificate {
         }
 
         if let Some(name) = server_name {
-            let certificate_names: Vec<String> = self
+            let mut certificate_names: Vec<String> = self
                 .tbs_certificate
                 .subject
                 .rdn_sequence
@@ -1353,6 +1834,14 @@ impl Certificate {
                 .map(|atav| atav.value.clone())
                 .collect();
 
+            if let Some(extensions) = &self.tbs_certificate.extensions
+                && let Some(subject_alt_name) = &extensions.subject_alt_name
+            {
+                certificate_names.extend_from_slice(&subject_alt_name.dns_names());
+            }
+
+            // TODO: does not handle wildcards
+            // TODO: does not handle IPv4/IPv6
             if !certificate_names.iter().any(|n| n == name) {
                 log::error!(
                     "Certificate.tbsCertificate.subject does not contain {}, valid for {:?}",
@@ -1360,6 +1849,22 @@ impl Certificate {
                     certificate_names
                 );
                 return Err(AlertDescription::BadCertificate);
+            }
+        }
+
+        if let Some(extensions) = &self.tbs_certificate.extensions {
+            if let Some(key_usage) = &extensions.key_usage {
+                // TODO: this extension is marked as critical
+                log::error!(
+                    "Certificate.tbsCertificate.extensions contains unimplemented KeyUsage extension {key_usage:?}"
+                );
+            }
+
+            if let Some(basic_constraints) = &extensions.basic_constraints {
+                // TODO: this extension is marked as critical
+                log::error!(
+                    "Certificate.tbsCertificate.extensions contains unimplemented BasicConstraints extension {basic_constraints:?}"
+                );
             }
         }
 
@@ -1382,30 +1887,38 @@ impl Certificate {
             }
         };
 
-        let digest: Vec<u8> = match signature_algorithm.algorithm.repr.as_str() {
+        let pk: &PublicKey = &self
+            .tbs_certificate
+            .subject_public_key_info
+            .subject_public_key;
+
+        match signature_algorithm.algorithm.repr.as_str() {
             // ecdsaWithSHA256 (ANSI X9.62 ECDSA algorithm with SHA256)
             "1.2.840.10045.4.3.2" => {
-                let mut hasher = sha2::Sha256::new();
-                hasher.update(tbs_certificate_bytes);
-                hasher.finalize().as_slice().to_vec()
+                pk.verify::<sha2::Sha256>(tbs_certificate_bytes, signature_bytes)
             }
             // ecdsaWithSHA384 (ANSI X9.62 ECDSA algorithm with SHA384)
             "1.2.840.10045.4.3.3" => {
-                let mut hasher = sha2::Sha384::new();
-                hasher.update(tbs_certificate_bytes);
-                hasher.finalize().as_slice().to_vec()
+                pk.verify::<sha2::Sha384>(tbs_certificate_bytes, signature_bytes)
+            }
+            // sha256WithRSAEncryption (PKCS #1)
+            "1.2.840.113549.1.1.11" => {
+                pk.verify::<sha2::Sha256>(tbs_certificate_bytes, signature_bytes)
+            }
+            // sha384WithRSAEncryption (PKCS #1)
+            "1.2.840.113549.1.1.12" => {
+                pk.verify::<sha2::Sha384>(tbs_certificate_bytes, signature_bytes)
+            }
+            // sha512WithRSAEncryption (PKCS #1)
+            "1.2.840.113549.1.1.13" => {
+                pk.verify::<sha2::Sha512>(tbs_certificate_bytes, signature_bytes)
             }
             oid => {
                 log::error!(
                     "Certificate.signatureAlgorithm.algorithm contains an unrecognized object identifier: {oid}"
                 );
-                return Err(AlertDescription::BadCertificate);
+                Err(AlertDescription::BadCertificate)
             }
-        };
-
-        self.tbs_certificate
-            .subject_public_key_info
-            .subject_public_key
-            .verify_prehash(&digest, signature_bytes)
+        }
     }
 }

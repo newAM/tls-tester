@@ -216,7 +216,7 @@ impl TlsClientStream {
         log::error!("TODO: Client does not validate certificate chain against trust anchors");
 
         let mut prev_entry: Option<&CertificateEntry> = None;
-        for entry in &certificate.certificate_list {
+        for (n, entry) in certificate.certificate_list.iter().enumerate() {
             if prev_entry.is_none() {
                 if let Some(name) = &self.server_name {
                     entry.data.validate(Some(name.name.as_str()))?;
@@ -228,6 +228,11 @@ impl TlsClientStream {
             }
 
             if let Some(prev_entry) = &prev_entry {
+                log::debug!(
+                    "Verifying entry {} Certificate.signature of Certificate.tbsCertificate with entry {} Certificate.tbsCertificate.subjectPublicKeyInfo",
+                    n.checked_sub(1).unwrap(),
+                    n
+                );
                 entry.data.verify_previous(
                     &prev_entry.tbs_certificate,
                     &prev_entry.data.signature_algorithm,
@@ -270,15 +275,6 @@ impl TlsClientStream {
         verify: &CertificateVerify,
         tsh: &[u8],
     ) -> Result<(), TlsError> {
-        if verify.algorithm != SignatureScheme::ecdsa_secp256r1_sha256 {
-            // TODO: implement required signature algorithms
-            log::error!(
-                "Client does not implement server's signature scheme: {:?}",
-                verify.algorithm
-            );
-            Err(AlertDescription::InternalError)?
-        }
-
         // The signature is represented as a DER-encoded X690 ECDSA-Sig-Value structure.
         //
         // The digital signature is then computed over the concatenation of:
@@ -300,12 +296,21 @@ impl TlsClientStream {
             }
         };
 
+        if verify.algorithm != SignatureScheme::ecdsa_secp256r1_sha256 {
+            // TODO: implement required signature algorithms
+            log::error!(
+                "Client does not implement server's signature scheme: {:?}",
+                verify.algorithm
+            );
+            Err(AlertDescription::InternalError)?
+        }
+
         end_entity_certificate
             .data
             .tbs_certificate
             .subject_public_key_info
             .subject_public_key
-            .verify(&to_verify, &verify.signature)?;
+            .verify::<sha2::Sha256>(&to_verify, &verify.signature)?;
 
         Ok(())
     }

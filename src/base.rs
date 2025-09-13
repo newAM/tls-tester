@@ -111,6 +111,10 @@ impl TlsStream {
     pub(crate) fn next_handshake_header(&mut self) -> Result<HandshakeHeader, TlsError> {
         loop {
             if let Some(buf) = self.pop_front_fixed() {
+                // master secret transcript hash spans ClientHello...server Finished
+                if self.state != TlsState::WaitClientFinished {
+                    self.key_schedule.update_transcript_hash(&buf);
+                }
                 let hs_hdr: HandshakeHeader = HandshakeHeader::deser(buf)?;
                 log::debug!("< {hs_hdr:?}");
                 return Ok(hs_hdr);
@@ -128,6 +132,10 @@ impl TlsStream {
 
         loop {
             if let Some(buf) = self.pop_front(hdr_len) {
+                // master secret transcript hash spans ClientHello...server Finished
+                if self.state != TlsState::WaitClientFinished {
+                    self.key_schedule.update_transcript_hash(&buf);
+                }
                 return Ok(buf);
             };
             self.read_next_record()?;
@@ -197,7 +205,6 @@ impl TlsStream {
                 let read_buf: &mut [u8] = &mut self.buf.make_contiguous()[orig_len..];
                 self.stream.read_exact(read_buf)?;
 
-                self.key_schedule.update_transcript_hash(read_buf);
                 self.key_schedule.increment_read_record_sequence_number();
             }
             ContentType::ApplicationData => {
@@ -294,10 +301,6 @@ impl TlsStream {
                         return Err(TlsError::RecvAlert(alert.description));
                     }
                     ContentType::Handshake => {
-                        // master secret transcript hash spans ClientHello...server Finished
-                        if self.state != TlsState::WaitClientFinished {
-                            self.key_schedule.update_transcript_hash(&buf);
-                        }
                         self.key_schedule.increment_read_record_sequence_number();
                         self.buf.extend(buf);
                     }

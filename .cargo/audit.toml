@@ -1,0 +1,3 @@
+[advisories]
+# not using RSA private keys at the moment
+ignore = ["RUSTSEC-2023-0071"]

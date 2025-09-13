@@ -46,6 +46,7 @@ A tool for testing [TLS 1.3] implementation compliance.
 - Forced HelloRetry
 - Invalid GCM tag
 - Missing handshake messages, such as CertificateVerify
+- Packing server Encrypted Extensions, Certificate, CertificateVerify, and Finished into a single record
 - Non-zero padding extension
 - Record fragmentation across key changes
 - Record overflow
