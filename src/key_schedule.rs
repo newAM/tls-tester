@@ -7,10 +7,9 @@
 //!
 //! [RFC 5869]: https://datatracker.ietf.org/doc/html/rfc5869
 
-use crate::alert::AlertDescription;
+use crate::{NamedGroup, alert::AlertDescription, handshake::KeyShareEntry};
 use hkdf::Hkdf;
 use hmac::Mac;
-use p256::{PublicKey, ecdh::EphemeralSecret};
 use rand::rngs::OsRng;
 use sha2::{
     Digest, Sha256,
@@ -125,9 +124,14 @@ pub enum KeyScheduleMain {
     Client,
 }
 
+pub enum SecretKey {
+    Secp256r1(p256::ecdh::EphemeralSecret),
+    X25519(x25519_dalek::ReusableSecret),
+}
+
 pub struct KeySchedule {
-    secret_key: Option<EphemeralSecret>,
-    public_key: Option<PublicKey>,
+    secret_key: Option<SecretKey>,
+    public_key: Option<KeyShareEntry>,
 
     main: KeyScheduleMain,
 
@@ -215,19 +219,45 @@ impl KeySchedule {
         }
     }
 
-    /// Create a new ephemeral secret, and return the public key bytes as an
-    /// uncompressed SEC1 encoded point.
-    pub fn new_secret_key(&mut self) -> [u8; 65] {
-        let (private, public) = {
-            let private_key = p256::ecdh::EphemeralSecret::random(&mut OsRng);
-            let public_sec1_bytes: [u8; 65] = p256::EncodedPoint::from(private_key.public_key())
-                .as_bytes()
-                .try_into()
-                .unwrap();
-            (private_key, public_sec1_bytes)
-        };
-        self.secret_key.replace(private);
-        public
+    /// Create a new ephemeral secret, and return the public key.
+    pub fn new_secret_key_client(&mut self, named_group: NamedGroup) -> KeyShareEntry {
+        match named_group {
+            NamedGroup::x25519 => {
+                let (private, public) = {
+                    let private_key = x25519_dalek::ReusableSecret::random_from_rng(OsRng);
+                    let public: x25519_dalek::PublicKey = (&private_key).into();
+
+                    (private_key, public)
+                };
+                self.secret_key.replace(SecretKey::X25519(private));
+                KeyShareEntry::X25519(public)
+            }
+            NamedGroup::secp256r1 => {
+                let (private, public) = {
+                    let private_key = p256::ecdh::EphemeralSecret::random(&mut OsRng);
+                    let public_key = private_key.public_key();
+
+                    (private_key, public_key)
+                };
+                self.secret_key.replace(SecretKey::Secp256r1(private));
+                KeyShareEntry::Secp256r1(public)
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    /// Create a new ephemeral secret, and return the public key.
+    pub fn new_secret_key_server(&mut self) -> KeyShareEntry {
+        match self
+            .public_key
+            .as_ref()
+            .expect("self.publick_key is uninitialized")
+            .named_group()
+        {
+            Ok(NamedGroup::x25519) => self.new_secret_key_client(NamedGroup::x25519),
+            Ok(NamedGroup::secp256r1) => self.new_secret_key_client(NamedGroup::secp256r1),
+            _ => unreachable!(),
+        }
     }
 
     pub fn update_transcript_hash(&mut self, data: &[u8]) {
@@ -246,23 +276,56 @@ impl KeySchedule {
         self.transcript_hash.clone()
     }
 
-    pub fn set_public_key(&mut self, key: PublicKey) {
+    pub fn set_public_key(&mut self, key: KeyShareEntry) {
         self.public_key.replace(key);
     }
 
     fn shared_secret(&self) -> SharedSecret {
-        self.secret_key
+        match self
+            .secret_key
             .as_ref()
             .expect("KeySchedule.secret_key has not been initialized")
-            .diffie_hellman(
-                self.public_key
+        {
+            SecretKey::Secp256r1(ephemeral_secret) => {
+                let public_key: &p256::PublicKey = match self
+                    .public_key
                     .as_ref()
-                    .expect("KeySchedule.public_key has not been initialized"),
-            )
-            .raw_secret_bytes()
-            .as_slice()
-            .try_into()
-            .unwrap()
+                    .expect("KeySchedule.public_key has not been initialized")
+                {
+                    KeyShareEntry::Secp256r1(public_key) => public_key,
+                    other => {
+                        unreachable!(
+                            "Public key {other:?} does not match private key type secp256r1"
+                        );
+                    }
+                };
+                ephemeral_secret
+                    .diffie_hellman(public_key)
+                    .raw_secret_bytes()
+                    .as_slice()
+                    .try_into()
+                    .unwrap()
+            }
+            SecretKey::X25519(ephemeral_secret) => {
+                let public_key: &x25519_dalek::PublicKey = match self
+                    .public_key
+                    .as_ref()
+                    .expect("KeySchedule.public_key has not been initialized")
+                {
+                    KeyShareEntry::X25519(public_key) => public_key,
+                    other => {
+                        unreachable!("Public key {other:?} does not match private key type X25519");
+                    }
+                };
+                ephemeral_secret
+                    .clone()
+                    .diffie_hellman(public_key)
+                    .as_bytes()
+                    .as_slice()
+                    .try_into()
+                    .unwrap()
+            }
+        }
     }
 
     pub fn binder_key(&mut self, psk: Option<&[u8; 32]>) -> Hkdf<Sha256> {

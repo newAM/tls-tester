@@ -7,7 +7,7 @@ use crate::{
     error::TlsError,
     handshake::{
         self, Certificate, CertificateEntry, CertificateVerify, ClientHelloBuilder,
-        HandshakeHeader, HandshakeType, NamedGroup, ServerHello,
+        HandshakeHeader, HandshakeType, KeyShareEntry, NamedGroup, ServerHello,
         extension::{self, ServerName, signature_scheme::SignatureScheme},
     },
     key_schedule::KeySchedule,
@@ -27,6 +27,7 @@ pub struct TlsClientBuilder {
     server_name: Option<ServerName>,
     trusted_roots: Vec<crate::x509::Certificate>,
     ignore_unknown_ca: bool,
+    supported_named_groups: Vec<NamedGroup>,
 }
 
 impl Default for TlsClientBuilder {
@@ -44,7 +45,18 @@ impl TlsClientBuilder {
             server_name: None,
             trusted_roots: Vec::new(),
             ignore_unknown_ca: false,
+            supported_named_groups: NamedGroup::default_groups(),
         }
+    }
+
+    #[must_use]
+    pub fn set_supported_name_groups(mut self, named_groups: Vec<NamedGroup>) -> Self {
+        assert!(
+            !named_groups.is_empty(),
+            "At least one group must be supported"
+        );
+        self.supported_named_groups = named_groups;
+        self
     }
 
     #[must_use]
@@ -124,6 +136,7 @@ impl TlsClientBuilder {
             psks: self.psks,
             buf: VecDeque::new(),
             record_size_limit: self.record_size_limit,
+            supported_named_groups: self.supported_named_groups,
         };
 
         let mut ret = TlsClientStream {
@@ -183,43 +196,21 @@ impl TlsClientStream {
             return Err(AlertDescription::ProtocolVersion)?;
         }
 
-        match server_hello.exts.key_share.group {
-            Ok(NamedGroup::secp256r1) => {}
+        match server_hello.exts.key_share.named_group() {
+            Ok(NamedGroup::secp256r1) | Ok(NamedGroup::x25519) => {}
             Ok(ng) => {
-                log::error!(
-                    "ServerHello KeyShare named group {ng:?} is not the expected secp256r1"
-                );
+                log::error!("ServerHello KeyShare named group {ng:?} is not supported");
                 return Err(AlertDescription::HandshakeFailure)?;
             }
             Err(v) => {
-                log::error!(
-                    "ServerHello KeyShare named group 0x{v:04X} is not the expected secp256r1"
-                );
+                log::error!("ServerHello KeyShare named group 0x{v:04X} is unrecognized");
                 return Err(AlertDescription::HandshakeFailure)?;
             }
         }
 
-        let kex_len: usize = server_hello.exts.key_share.key_exchange.len();
-        if kex_len != 65 {
-            log::error!(
-                "ServerHello KeyShare key_exchange length is {kex_len} expected 65 for secp256r1"
-            );
-            return Err(AlertDescription::DecodeError)?;
-        }
-
-        let key: p256::PublicKey = match p256::PublicKey::from_sec1_bytes(
-            &server_hello.exts.key_share.key_exchange,
-        ) {
-            Ok(pk) => pk,
-            Err(_) => {
-                log::error!(
-                    "ServerHello KeyShareEntry secp256r1 key_exchange data is not a valid SEC1 public key"
-                );
-                return Err(AlertDescription::DecodeError)?;
-            }
-        };
-
-        self.base.key_schedule.set_public_key(key);
+        self.base
+            .key_schedule
+            .set_public_key(server_hello.exts.key_share.clone());
         self.base.key_schedule.initialize_handshake_secret();
 
         self.base.set_state(TlsState::WaitEncryptedExtensions);
@@ -476,11 +467,14 @@ impl TlsClientStream {
     }
 
     fn handshake_alertable(&mut self) -> Result<(), TlsError> {
-        let pub_key: [u8; 65] = self.base.key_schedule.new_secret_key();
+        let pub_key: KeyShareEntry = self
+            .base
+            .key_schedule
+            .new_secret_key_client(*self.base.supported_named_groups.first().unwrap());
 
         let ch_build: ClientHelloBuilder =
             ClientHelloBuilder::new().set_server_name(self.server_name.clone());
-        let data = ch_build.build(&pub_key);
+        let data = ch_build.build(&self.base.supported_named_groups, pub_key);
         self.base
             .write_unencrypted_record(ContentType::Handshake, &data)?;
 

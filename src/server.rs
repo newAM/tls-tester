@@ -13,16 +13,16 @@ use crate::{
     cipher_suite::CipherSuite,
     error::TlsError,
     handshake::{
-        self, CertificateVerify, ClientHello, HandshakeHeader, HandshakeType, NamedGroup,
-        ServerHelloBuilder,
+        self, CertificateVerify, ClientHello, HandshakeHeader, HandshakeType, KeyShareEntry,
+        NamedGroup, ServerHelloBuilder,
         extension::{self, EncryptedExtensions},
     },
     key_schedule::KeySchedule,
     record::{self, ContentType},
 };
 use p256::pkcs8::DecodePrivateKey as _;
+use sha2::Digest as _;
 use sha2::digest::crypto_common::{generic_array::GenericArray, typenum::U32};
-use sha2::{Digest as _, Sha256};
 
 fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
     let parsed = match pem::parse(pem) {
@@ -97,6 +97,7 @@ impl ServerCertificates {
 pub struct TlsServerBuilder {
     record_size_limit: u16,
     psks: Vec<Psk>,
+    supported_named_groups: Vec<NamedGroup>,
 }
 
 impl Default for TlsServerBuilder {
@@ -111,7 +112,18 @@ impl TlsServerBuilder {
         Self {
             record_size_limit: extension::RecordSizeLimit::LIMIT_MAX,
             psks: Vec::new(),
+            supported_named_groups: NamedGroup::default_groups(),
         }
+    }
+
+    #[must_use]
+    pub fn set_supported_name_groups(mut self, named_groups: Vec<NamedGroup>) -> Self {
+        assert!(
+            !named_groups.is_empty(),
+            "At least one group must be supported"
+        );
+        self.supported_named_groups = named_groups;
+        self
     }
 
     #[must_use]
@@ -138,8 +150,13 @@ impl TlsServerBuilder {
             psks: self.psks,
             buf: VecDeque::new(),
             record_size_limit: self.record_size_limit,
+            supported_named_groups: self.supported_named_groups,
         };
-        let mut ret = TlsServerStream { base, certs };
+        let mut ret = TlsServerStream {
+            base,
+            certs,
+            hello_retry_request: false,
+        };
 
         ret.handshake()?;
 
@@ -150,9 +167,16 @@ impl TlsServerBuilder {
 pub struct TlsServerStream {
     base: TlsStream,
     certs: ServerCertificates,
+    hello_retry_request: bool,
 }
 
 impl TlsServerStream {
+    /// Returns `true` if a hello retry request has been sent
+    #[must_use]
+    pub fn hello_retry_request(&self) -> bool {
+        self.hello_retry_request
+    }
+
     fn read_client_hello(&mut self) -> Result<ClientHello, TlsError> {
         let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
 
@@ -203,19 +227,29 @@ impl TlsServerStream {
         // trip.
         if client_hello.exts.supported_groups.is_empty() {
             log::info!("ClientHello has an empty client_shares vector");
-            // this is a hack, removing the secp256r1 key will force a hello retry
-            client_hello.exts.key_share.secp256r1 = None;
+            // this is a hack, removing the client shares will force a hello retry
+            client_hello.exts.key_share.client_shares = vec![];
             return Ok((None, None));
         }
 
-        if !client_hello
+        let named_group: NamedGroup = match client_hello
             .exts
             .supported_groups
-            .contains(&NamedGroup::secp256r1)
+            .iter()
+            .find(|&group| self.base.supported_named_groups.contains(group))
         {
-            log::error!("ClientHello SupportedGroups does not contain secp256r1");
-            return Err(AlertDescription::HandshakeFailure)?;
-        }
+            Some(ng) => *ng,
+            None => {
+                log::error!(
+                    "ClientHello SupportedGroups {:?} does not contain any group supported by the server {:?}",
+                    client_hello.exts.supported_groups,
+                    self.base.supported_named_groups,
+                );
+                return Err(AlertDescription::HandshakeFailure)?;
+            }
+        };
+
+        log::debug!("Selected named group {named_group:?}");
 
         let mut selected_identity: Option<u16> = None;
         let mut binder_key: Option<[u8; 32]> = None;
@@ -301,21 +335,34 @@ impl TlsServerStream {
         let (mut binder_key, mut selected_identity): (Option<[u8; 32]>, Option<u16>) =
             self.handle_client_hello(&mut client_hello)?;
 
-        if let Some(client_pub_secp256r1_key) = client_hello.exts.key_share.secp256r1 {
-            self.base
-                .key_schedule
-                .set_public_key(client_pub_secp256r1_key);
+        let key_share: Option<KeyShareEntry> = client_hello
+            .exts
+            .key_share
+            .client_shares
+            .iter()
+            .find(|&kse| {
+                self.base
+                    .supported_named_groups
+                    .iter()
+                    .any(|&ng| Ok(ng) == kse.named_group())
+            })
+            .cloned();
+
+        if let Some(entry) = key_share {
+            self.base.key_schedule.set_public_key(entry.clone());
         } else {
             // https://datatracker.ietf.org/doc/html/rfc8446#section-4.1.1
             // If the server selects an (EC)DHE group and the client did not offer a
             // compatible "key_share" extension in the initial ClientHello, the
             // server MUST respond with a HelloRetryRequest (Section 4.1.4) message.
 
+            self.hello_retry_request = true;
+
             // When the server responds to a ClientHello with a HelloRetryRequest,
             // the value of ClientHello1 is replaced with a special synthetic handshake
             // message of handshake type "message_hash" containing Hash(ClientHello1).
             let hash_client_hello1 = self.base.key_schedule.transcript_hash_bytes();
-            let mut new_transcript_hash: Sha256 = Sha256::new();
+            let mut new_transcript_hash: sha2::Sha256 = sha2::Sha256::new();
             new_transcript_hash.update(HandshakeHeader::prepend_header(
                 HandshakeType::MessageHash,
                 &hash_client_hello1,
@@ -339,10 +386,21 @@ impl TlsServerStream {
             client_hello = self.read_client_hello()?;
             (binder_key, selected_identity) = self.handle_client_hello(&mut client_hello)?;
 
-            if let Some(client_pub_secp256r1_key) = client_hello.exts.key_share.secp256r1 {
-                self.base
-                    .key_schedule
-                    .set_public_key(client_pub_secp256r1_key);
+            let key_share: Option<KeyShareEntry> = client_hello
+                .exts
+                .key_share
+                .client_shares
+                .iter()
+                .find(|&kse| {
+                    self.base
+                        .supported_named_groups
+                        .iter()
+                        .any(|&ng| Ok(ng) == kse.named_group())
+                })
+                .cloned();
+
+            if let Some(kse) = key_share {
+                self.base.key_schedule.set_public_key(kse);
             } else {
                 log::error!("Client failed to negotiate key share with server");
                 return Err(AlertDescription::InsufficientSecurity)?;
@@ -358,16 +416,12 @@ impl TlsServerStream {
             return Err(AlertDescription::DecodeError)?;
         }
 
-        let key: [u8; 65] = self.base.key_schedule.new_secret_key();
+        let key: KeyShareEntry = self.base.key_schedule.new_secret_key_server();
 
         let server_hello: Vec<u8> = HandshakeHeader::prepend_header(
             HandshakeType::ServerHello,
-            &ServerHelloBuilder::new(
-                &client_hello.legacy_session_id_echo,
-                &key,
-                selected_identity,
-            )
-            .ser(),
+            &ServerHelloBuilder::new(&client_hello.legacy_session_id_echo, key, selected_identity)
+                .ser(),
         );
 
         self.base

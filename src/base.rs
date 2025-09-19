@@ -9,7 +9,7 @@ use hmac::digest::consts::{U12, U16};
 
 use crate::{
     Alert, AlertDescription, GCM_TAG_LEN, Psk, TlsError,
-    handshake::HandshakeHeader,
+    handshake::{HandshakeHeader, NamedGroup},
     key_schedule::KeySchedule,
     record::{ContentType, RecordHeader},
 };
@@ -65,6 +65,7 @@ pub(crate) struct TlsStream {
     pub(crate) psks: Vec<Psk>,
     pub(crate) buf: std::collections::VecDeque<u8>,
     pub(crate) record_size_limit: u16,
+    pub(crate) supported_named_groups: Vec<NamedGroup>,
 }
 
 impl TlsStream {

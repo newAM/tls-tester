@@ -1,5 +1,6 @@
 use tls_tester::{
-    ServerCertificates, TlsClientBuilder, TlsClientStream, TlsServerBuilder, TlsServerStream,
+    NamedGroup, ServerCertificates, TlsClientBuilder, TlsClientStream, TlsServerBuilder,
+    TlsServerStream,
 };
 
 use std::{
@@ -7,8 +8,7 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
 };
 
-#[test]
-fn test_loopback() {
+fn loopback_with_named_groups(named_groups: Vec<NamedGroup>) {
     stderrlog::new()
         .verbosity(4)
         .timestamp(stderrlog::Timestamp::Microsecond)
@@ -51,6 +51,7 @@ fn test_loopback() {
     log::info!("Handshaking");
     let mut tls_stream: TlsClientStream = TlsClientBuilder::new()
         .ignore_unknown_ca(true)
+        .set_supported_name_groups(named_groups)
         .handshake(tcp_stream)
         .expect("TLS handshake failed");
 
@@ -62,4 +63,14 @@ fn test_loopback() {
 
     assert_eq!(&server_rx_data, b"ping");
     assert_eq!(&client_rx_data, b"pong");
+}
+
+#[test]
+fn loopback_secp256r1() {
+    loopback_with_named_groups(vec![NamedGroup::secp256r1]);
+}
+
+#[test]
+fn loopback_x25519() {
+    loopback_with_named_groups(vec![NamedGroup::x25519]);
 }

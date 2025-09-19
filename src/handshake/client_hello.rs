@@ -7,7 +7,7 @@ use crate::{
 };
 
 use super::{
-    HandshakeHeader, HandshakeType,
+    HandshakeHeader, HandshakeType, KeyShareEntry, NamedGroup,
     extension::{
         ClientHelloExtensions, ServerName, SupportedVersionsClientHello,
         signature_scheme::ser_signature_scheme_list,
@@ -115,6 +115,7 @@ impl ClientHelloBuilder {
         }
     }
 
+    #[must_use]
     pub fn set_server_name(mut self, server_name: Option<ServerName>) -> Self {
         self.server_name = server_name;
         self
@@ -124,7 +125,7 @@ impl ClientHelloBuilder {
         self.random
     }
 
-    pub fn build(&self, pub_key: &[u8; 65]) -> Vec<u8> {
+    pub fn build(&self, named_groups: &[NamedGroup], pub_key: KeyShareEntry) -> Vec<u8> {
         let mut data: Vec<u8> = Vec::new();
 
         // legacy_version
@@ -161,7 +162,7 @@ impl ClientHelloBuilder {
         );
         extensions.extend_from_slice(&supported_versions);
 
-        let key_share: Vec<u8> = KeyShareClientHello::ser_secp256r1(pub_key);
+        let key_share: Vec<u8> = KeyShareClientHello::ser(vec![pub_key]);
         extensions.extend_from_slice(ExtensionType::KeyShare.to_be_bytes().as_ref());
         extensions.extend_from_slice(
             u16::try_from(key_share.len())
@@ -171,7 +172,7 @@ impl ClientHelloBuilder {
         );
         extensions.extend_from_slice(&key_share);
 
-        let supported_groups: Vec<u8> = ser_named_group_list();
+        let supported_groups: Vec<u8> = ser_named_group_list(named_groups);
         extensions.extend_from_slice(ExtensionType::SupportedGroups.to_be_bytes().as_ref());
         extensions.extend_from_slice(
             u16::try_from(supported_groups.len())

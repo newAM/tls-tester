@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Added a client implementation.
+- Added all recommended key exchange algorithms: `X25519`.
 
 ### Changed
 

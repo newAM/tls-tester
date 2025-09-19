@@ -1,5 +1,9 @@
 use crate::{alert::AlertDescription, parse};
 
+/// Named groups.
+///
+/// Cryptography algorithms used for key exchange.
+///
 /// # References
 ///
 /// - [RFC 8446 Section 4.2.7](https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.7)
@@ -9,7 +13,7 @@ use crate::{alert::AlertDescription, parse};
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types, dead_code)]
-pub(crate) enum NamedGroup {
+pub enum NamedGroup {
     // Elliptic Curve Groups (ECDHE)
     secp256r1 = 0x0017, // required
     secp384r1 = 0x0018,
@@ -32,20 +36,24 @@ pub(crate) enum NamedGroup {
 }
 
 impl NamedGroup {
-    pub const fn msb(self) -> u8 {
+    pub(crate) const fn msb(self) -> u8 {
         ((self as u16) >> 8) as u8
     }
 
-    pub const fn lsb(self) -> u8 {
+    pub(crate) const fn lsb(self) -> u8 {
         self as u8
     }
 
-    pub const fn to_be_bytes(self) -> [u8; 2] {
+    pub(crate) const fn to_be_bytes(self) -> [u8; 2] {
         (self as u16).to_be_bytes()
     }
 
-    pub fn from_be_bytes(bytes: [u8; 2]) -> Result<Self, u16> {
+    pub(crate) fn from_be_bytes(bytes: [u8; 2]) -> Result<Self, u16> {
         Self::try_from(u16::from_be_bytes(bytes))
+    }
+
+    pub(crate) fn default_groups() -> Vec<NamedGroup> {
+        vec![NamedGroup::secp256r1, NamedGroup::x25519]
     }
 }
 
@@ -104,11 +112,15 @@ pub(crate) fn deser_named_group_list(b: &[u8]) -> Result<Vec<NamedGroup>, AlertD
     Ok(ret)
 }
 
-pub(crate) fn ser_named_group_list() -> Vec<u8> {
+pub(crate) fn ser_named_group_list(named_groups: &[NamedGroup]) -> Vec<u8> {
     let mut ret: Vec<u8> = Vec::new();
 
-    ret.extend_from_slice(2_u16.to_be_bytes().as_ref());
-    ret.extend_from_slice(NamedGroup::secp256r1.to_be_bytes().as_ref());
+    let extension_len: u16 = (named_groups.len() as u16) * 2;
+
+    ret.extend_from_slice(extension_len.to_be_bytes().as_ref());
+    named_groups
+        .iter()
+        .for_each(|group| ret.extend_from_slice(group.to_be_bytes().as_ref()));
 
     ret
 }

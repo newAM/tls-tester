@@ -1,4 +1,4 @@
-use tls_tester::{ServerCertificates, TlsServerBuilder, TlsServerStream};
+use tls_tester::{NamedGroup, ServerCertificates, TlsServerBuilder, TlsServerStream};
 
 use std::{
     io::{Read as _, Write as _},
@@ -6,7 +6,10 @@ use std::{
     process::{Command, Output},
 };
 
-fn test_curl_with_args(args: &'static [&'static str]) {
+fn test_curl_with_args(
+    args: &'static [&'static str],
+    supported_named_groups: Vec<NamedGroup>,
+) -> TlsServerStream {
     stderrlog::new()
         .verbosity(4)
         .timestamp(stderrlog::Timestamp::Microsecond)
@@ -53,6 +56,7 @@ fn test_curl_with_args(args: &'static [&'static str]) {
     let (client, addr) = listener.accept().expect("Unable to accept connections");
     log::info!("Accepted connection from {addr}");
     let mut tls_stream: TlsServerStream = TlsServerBuilder::new()
+        .set_supported_name_groups(supported_named_groups)
         .handshake(client, certs)
         .expect("Failed to create TLS stream");
     let mut http_buf: [u8; 4096] = [0; 4096];
@@ -69,14 +73,29 @@ fn test_curl_with_args(args: &'static [&'static str]) {
 
     let curl_status = curl_thread.join().expect("Failed to join curl thread");
     assert!(curl_status);
+
+    tls_stream
 }
 
 #[test]
-fn test_server_curl() {
-    test_curl_with_args(&["--curves", "secp256r1"])
+fn server_curl_secp256r1() {
+    test_curl_with_args(&["--curves", "secp256r1"], vec![NamedGroup::secp256r1]);
 }
 
 #[test]
-fn test_server_curl_hello_retry() {
-    test_curl_with_args(&["--curves", "x25519:secp256r1"])
+fn server_curl_x25519() {
+    test_curl_with_args(&["--curves", "x25519"], vec![NamedGroup::x25519]);
+}
+
+#[test]
+fn server_curl_hello_retry() {
+    let server_stream = test_curl_with_args(
+        &["--curves", "x25519:secp256r1"],
+        vec![NamedGroup::secp256r1],
+    );
+
+    assert!(
+        server_stream.hello_retry_request(),
+        "Server did not send a hello retry"
+    );
 }

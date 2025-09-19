@@ -9,7 +9,8 @@ mod supported_versions;
 use std::collections::HashSet;
 
 pub use encrypted::EncryptedExtensions;
-pub use key_share::{KeyShareClientHello, KeyShareServerHello};
+pub use key_share::KeyShareServerHello;
+pub(crate) use key_share::{KeyShareClientHello, KeyShareEntry};
 use psk::PskKeyExchangeModes;
 pub use psk::{OfferedPsks, PskServerHello};
 pub use record_size_limit::RecordSizeLimit;
@@ -178,14 +179,14 @@ impl ClientHelloExtensions {
             // given extension block.
             let duplicate: bool = !extenstion_types.insert(extension_type);
             if duplicate {
-                log::error!("ClientHello Extension appeared more than once: {extension_pretty}");
+                log::error!("< ClientHello Extension appeared more than once: {extension_pretty}");
                 return Err(AlertDescription::DecodeError)?;
             }
 
             match extension_type {
                 Ok(ExtensionType::ServerName) => {
                     let server_name_list_deser = ServerNameList::deser(data)?;
-                    log::debug!("ClientHello ServerName {:?}", server_name_list_deser);
+                    log::debug!("< ClientHello ServerName {:?}", server_name_list_deser);
                     server_name_list.replace(server_name_list_deser);
                 }
                 Ok(ExtensionType::MaxFragmentLength) => {
@@ -196,13 +197,13 @@ impl ClientHelloExtensions {
                 }
                 Ok(ExtensionType::SupportedGroups) => {
                     let supported_groups_deser = deser_named_group_list(data)?;
-                    log::debug!("ClientHello SupportedGroups {supported_groups_deser:?}");
+                    log::debug!("< ClientHello SupportedGroups {supported_groups_deser:?}");
                     supported_groups.replace(supported_groups_deser);
                 }
                 Ok(ExtensionType::SignatureAlgorithms) => {
                     let signature_scheme_list: Vec<SignatureScheme> =
                         deser_signature_scheme_list(data)?;
-                    log::debug!("ClientHello SignatureAlgorithms {signature_scheme_list:?}");
+                    log::debug!("< ClientHello SignatureAlgorithms {signature_scheme_list:?}");
 
                     signature_algorithms.replace(signature_scheme_list);
                 }
@@ -227,7 +228,7 @@ impl ClientHelloExtensions {
                     log::warn!("Ignoring ClientHello extension ServerCertificateType");
                 }
                 Ok(ExtensionType::Padding) => {
-                    log::debug!("ClientHello padding length {}", data.len());
+                    log::debug!("< ClientHello padding length {}", data.len());
                     let all_zero: bool = data.iter().all(|&x| x == 0);
                     if !all_zero {
                         log::error!("ClientHello Padding extension is non-zero");
@@ -236,7 +237,7 @@ impl ClientHelloExtensions {
                 }
                 Ok(ExtensionType::RecordSizeLimit) => {
                     let rsl: RecordSizeLimit = RecordSizeLimit::deser(data)?;
-                    log::debug!("ClientHello RecordSizeLimit {rsl:?}");
+                    log::debug!("< ClientHello RecordSizeLimit {rsl:?}");
                     record_size_limit.replace(rsl);
                 }
                 Ok(ExtensionType::PreSharedKey) => {
@@ -253,7 +254,7 @@ impl ClientHelloExtensions {
 
                     let offered_psks = OfferedPsks::deser(data)?;
 
-                    log::debug!("ClientHello PreSharedKey {offered_psks:?}");
+                    log::debug!("< ClientHello PreSharedKey {offered_psks:?}");
 
                     pre_shared_key.replace(offered_psks);
                 }
@@ -262,7 +263,7 @@ impl ClientHelloExtensions {
                 }
                 Ok(ExtensionType::SupportedVersions) => {
                     let supported_versions_deser = SupportedVersionsClientHello::deser(data)?;
-                    log::debug!("ClientHello supported_versions {supported_versions_deser:04x?}");
+                    log::debug!("< ClientHello supported_versions {supported_versions_deser:04x?}");
                     supported_versions.replace(supported_versions_deser);
                 }
                 Ok(ExtensionType::Cookie) => {
@@ -273,7 +274,9 @@ impl ClientHelloExtensions {
                 }
                 Ok(ExtensionType::PskKeyExchangeModes) => {
                     let psk_key_exchange_modes_deser = PskKeyExchangeModes::deser(data)?;
-                    log::debug!("ClientHello PskKeyExchangeModes {psk_key_exchange_modes_deser:?}");
+                    log::debug!(
+                        "< ClientHello PskKeyExchangeModes {psk_key_exchange_modes_deser:?}"
+                    );
                     psk_key_exchange_modes.replace(psk_key_exchange_modes_deser);
                 }
                 Ok(ExtensionType::CertificateAuthorities) => {
@@ -288,12 +291,12 @@ impl ClientHelloExtensions {
                 Ok(ExtensionType::SignatureAlgorithmsCert) => {
                     let signature_scheme_list: Vec<SignatureScheme> =
                         deser_signature_scheme_list(data)?;
-                    log::debug!("ClientHello SignatureAlgorithmsCert {signature_scheme_list:?}");
+                    log::debug!("< ClientHello SignatureAlgorithmsCert {signature_scheme_list:?}");
                     signature_algorithms_cert.replace(signature_scheme_list);
                 }
                 Ok(ExtensionType::KeyShare) => {
-                    let key_share_ch = KeyShareClientHello::deser_secp256r1(data)?;
-                    log::debug!("ClientHello KeyShare {key_share_ch:?}");
+                    let key_share_ch = KeyShareClientHello::deser(data)?;
+                    log::debug!("< ClientHello KeyShare {key_share_ch:?}");
                     key_share.replace(key_share_ch);
                 }
                 Err(val) => {

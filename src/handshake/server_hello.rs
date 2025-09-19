@@ -1,6 +1,6 @@
 use super::{
-    NamedGroup,
-    extension::{KeyShareServerHello, PskServerHello, ServerHelloExtension, ServerHelloExtensions},
+    KeyShareEntry, NamedGroup,
+    extension::{PskServerHello, ServerHelloExtension, ServerHelloExtensions},
 };
 use rand::{RngCore, rngs::OsRng};
 
@@ -42,7 +42,7 @@ pub struct ServerHelloBuilder {
 impl ServerHelloBuilder {
     pub fn new(
         legacy_session_id_echo: &[u8],
-        key: &[u8; 65],
+        key: KeyShareEntry,
         selected_identity: Option<u16>,
     ) -> Self {
         let mut random: [u8; 32] = [0; 32];
@@ -58,9 +58,7 @@ impl ServerHelloBuilder {
             )));
         }
 
-        extensions.push(ServerHelloExtension::KeyShareServerHello(
-            KeyShareServerHello::new_secp256r1(key),
-        ));
+        extensions.push(ServerHelloExtension::KeyShareServerHello(key));
 
         Self {
             random,

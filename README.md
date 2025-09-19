@@ -32,8 +32,6 @@ A tool for testing [TLS 1.3] implementation compliance.
   - Does not implement all recommended cipher suites, missing:
     - `TLS_AES_256_GCM_SHA384`
     - `TLS_CHACHA20_POLY1305_SHA256`
-  - Does not implement all recommended key exchange algorithms, missing:
-    - `X25519`
 - Client ignores server `EncryptedExtensions`
 - Client ignores TLS certificate extensions
 - Certificate parsing is messy and contains many outstanding TODOs
