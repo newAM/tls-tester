@@ -15,10 +15,8 @@ use crate::{
     record::{self, ContentType},
     tls_version::TlsVersion,
 };
-use sha2::{
-    Digest as _,
-    digest::crypto_common::{generic_array::GenericArray, typenum::U32},
-};
+use hmac::digest::array::Array;
+use sha2::{Digest as _, digest::crypto_common::typenum::U32};
 
 #[derive(Debug, Clone)]
 pub struct TlsClientBuilder {
@@ -449,8 +447,7 @@ impl TlsClientStream {
     }
 
     fn send_client_finished(&mut self) -> Result<(), TlsError> {
-        let verify_data: GenericArray<u8, U32> =
-            self.base.key_schedule.client_finished_verify_data();
+        let verify_data: Array<u8, U32> = self.base.key_schedule.client_finished_verify_data();
         let finished: Vec<u8> = handshake::finished_with_hs_hdr(&verify_data);
 
         self.base

@@ -1,4 +1,4 @@
-use rand::{RngCore as _, rngs::OsRng};
+use rand::{TryRngCore as _, rngs::OsRng};
 
 use crate::{
     handshake::extension::{ExtensionType, KeyShareClientHello},
@@ -108,7 +108,7 @@ pub(crate) struct ClientHelloBuilder {
 impl ClientHelloBuilder {
     pub fn new() -> Self {
         let mut random: [u8; 32] = [0; 32];
-        OsRng.fill_bytes(&mut random);
+        OsRng.try_fill_bytes(&mut random).expect("OsRng failure");
         Self {
             random,
             server_name: None,

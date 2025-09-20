@@ -1,5 +1,4 @@
 use super::{HandshakeHeader, HandshakeType};
-use sha2::digest::crypto_common::{generic_array::GenericArray, typenum::U32};
 
 /// # References
 ///
@@ -10,6 +9,6 @@ use sha2::digest::crypto_common::{generic_array::GenericArray, typenum::U32};
 ///     opaque verify_data[Hash.length];
 /// } Finished;
 /// ```
-pub fn finished_with_hs_hdr(verify_data: &GenericArray<u8, U32>) -> Vec<u8> {
+pub fn finished_with_hs_hdr(verify_data: &[u8]) -> Vec<u8> {
     HandshakeHeader::prepend_header(HandshakeType::Finished, verify_data)
 }

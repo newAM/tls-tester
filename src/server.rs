@@ -22,7 +22,6 @@ use crate::{
 };
 use p256::pkcs8::DecodePrivateKey as _;
 use sha2::Digest as _;
-use sha2::digest::crypto_common::{generic_array::GenericArray, typenum::U32};
 
 fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
     let parsed = match pem::parse(pem) {
@@ -478,8 +477,7 @@ impl TlsServerStream {
                 .write_encrypted_records(record::ContentType::Handshake, &certificate_verify)?;
         }
 
-        let verify_data: GenericArray<u8, U32> =
-            self.base.key_schedule.server_finished_verify_data();
+        let verify_data = self.base.key_schedule.server_finished_verify_data();
         let finished: Vec<u8> = handshake::finished_with_hs_hdr(&verify_data);
 
         self.base

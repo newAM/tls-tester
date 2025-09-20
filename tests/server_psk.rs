@@ -1,4 +1,3 @@
-use rand::rngs::OsRng;
 use std::{
     io::Read as _,
     net::TcpListener,
@@ -64,7 +63,11 @@ fn test_server_psk() {
             Client::new(TLS_SN, SPORT, HOSTNAME, HOST, PSK_ID, &PSK, &mut rxbuf);
 
         loop {
-            match client.process(&mut w5500, &mut OsRng, monotonic_secs(start)) {
+            match client.process(
+                &mut w5500,
+                &mut rand_old::rngs::OsRng,
+                monotonic_secs(start),
+            ) {
                 Ok(Event::CallAfter(_)) => (),
                 Ok(Event::Publish(mut reader)) => {
                     let mut payload_buf: [u8; 128] = [0; 128];
