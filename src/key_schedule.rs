@@ -224,7 +224,7 @@ impl KeySchedule {
         match named_group {
             NamedGroup::x25519 => {
                 let (private, public) = {
-                    let private_key = x25519_dalek::ReusableSecret::random_from_rng(OsRng);
+                    let private_key = x25519_dalek::ReusableSecret::random();
                     let public: x25519_dalek::PublicKey = (&private_key).into();
 
                     (private_key, public)

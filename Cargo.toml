@@ -19,7 +19,10 @@ pem = "3.0.5"
 rand = "0.8.5"
 rsa = { version = "0.9.8", features = ["sha2"] }
 sha2 = "0.10.9"
-x25519-dalek = { version = "2.0.1", features = ["reusable_secrets"] }
+x25519-dalek = { version = "3.0.0-pre.1", features = [
+  "reusable_secrets",
+  "os_rng",
+] }
 
 [dev-dependencies]
 stderrlog = "0.6"
