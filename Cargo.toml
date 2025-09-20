@@ -8,7 +8,7 @@ authors = ["Alex Martens <alex@thinglab.org>"]
 repository = "https://github.com/newAM/tls-tester"
 
 [dependencies]
-aes-gcm = "0.10.3"
+aes-gcm = "0.11.0-rc.1"
 hkdf = "0.12.4"
 hmac = "0.12.1"
 jiff = "0.2.15"

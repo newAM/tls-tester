@@ -67,7 +67,7 @@ pub fn vec8<'a>(
         return Err(AlertDescription::DecodeError);
     }
 
-    if len % multiple != 0 {
+    if !len.is_multiple_of(multiple) {
         log::error!("{name} length is not a multiple of {multiple}");
         return Err(AlertDescription::DecodeError);
     }
@@ -107,7 +107,7 @@ pub fn vec16<'a>(
         return Err(AlertDescription::DecodeError);
     }
 
-    if len % multiple != 0 {
+    if !len.is_multiple_of(multiple) {
         log::error!("{name} length of {len} is not a multiple of {multiple}");
         return Err(AlertDescription::DecodeError);
     }
@@ -150,7 +150,7 @@ pub fn vec24<'a>(
         return Err(AlertDescription::DecodeError);
     }
 
-    if len % multiple != 0 {
+    if !len.is_multiple_of(multiple) {
         log::error!("{name} length of {len} is not a multiple of {multiple}");
         return Err(AlertDescription::DecodeError);
     }

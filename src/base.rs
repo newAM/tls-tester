@@ -4,8 +4,8 @@ use std::{
     net::TcpStream,
 };
 
-use aes_gcm::{Aes128Gcm, KeyInit as _, aead::AeadMutInPlace as _};
-use hmac::digest::consts::{U12, U16};
+use aes_gcm::{Aes128Gcm, KeyInit as _, aead::AeadInOut as _};
+use hmac::digest::consts::U12;
 
 use crate::{
     Alert, AlertDescription, GCM_TAG_LEN, Psk, TlsError,
@@ -228,18 +228,11 @@ impl TlsStream {
 
                 let (key, nonce): ([u8; 16], [u8; 12]) =
                     self.key_schedule.read_key_and_nonce().unwrap();
-                let nonce: aes_gcm::Nonce<U12> = aes_gcm::Nonce::clone_from_slice(&nonce);
-                let key: aes_gcm::Key<Aes128Gcm> =
-                    aes_gcm::Key::<Aes128Gcm>::clone_from_slice(&key);
+                let nonce: aes_gcm::Nonce<U12> = aes_gcm::Nonce::from(nonce);
+                let key: aes_gcm::Key<Aes128Gcm> = aes_gcm::Key::<Aes128Gcm>::from(key);
 
-                // unwrap will not occur due to initial length checks
-                let tag: Vec<u8> = buf.split_off(buf.len().checked_sub(GCM_TAG_LEN).unwrap());
-                let tag: [u8; GCM_TAG_LEN] = tag.try_into().unwrap();
-                let tag: aes_gcm::Tag<U16> = tag.into();
-
-                let mut cipher = Aes128Gcm::new(&key);
-                if cipher
-                    .decrypt_in_place_detached(&nonce, rec_hdr.as_bytes(), &mut buf, &tag)
+                if Aes128Gcm::new(&key)
+                    .decrypt_in_place(&nonce, rec_hdr.as_bytes(), &mut buf)
                     .is_err()
                 {
                     log::error!("Tag mismatch during record decryption");
@@ -386,8 +379,8 @@ impl TlsStream {
 
             let (key, nonce): ([u8; 16], [u8; 12]) =
                 self.key_schedule.write_key_and_nonce().unwrap();
-            let nonce: aes_gcm::Nonce<U12> = aes_gcm::Nonce::clone_from_slice(&nonce);
-            let key: aes_gcm::Key<Aes128Gcm> = aes_gcm::Key::<Aes128Gcm>::clone_from_slice(&key);
+            let nonce: aes_gcm::Nonce<U12> = aes_gcm::Nonce::from(nonce);
+            let key: aes_gcm::Key<Aes128Gcm> = aes_gcm::Key::<Aes128Gcm>::from(key);
 
             // master secret transcript hash spans ClientHello...server Finished
             if self.state != TlsState::WaitServerFinished {
@@ -396,21 +389,18 @@ impl TlsStream {
 
             record_data.push(content_type as u8);
 
-            let mut cipher = Aes128Gcm::new(&key);
-            let tag: aes_gcm::Tag<U16> =
-                match cipher.encrypt_in_place_detached(&nonce, hdr.as_bytes(), &mut record_data) {
-                    Ok(tag) => tag,
-                    Err(_) => {
-                        log::error!("Failed to encrypt record");
-                        return Err(AlertDescription::InternalError)?;
-                    }
-                };
+            match Aes128Gcm::new(&key).encrypt_in_place(&nonce, hdr.as_bytes(), &mut record_data) {
+                Ok(()) => (),
+                Err(_) => {
+                    log::error!("Failed to encrypt record");
+                    return Err(AlertDescription::InternalError)?;
+                }
+            };
 
             log::debug!("> {hdr:?}");
 
             self.stream.write_all(hdr.as_bytes())?;
             self.stream.write_all(&record_data)?;
-            self.stream.write_all(tag.as_slice())?;
 
             self.key_schedule.increment_write_record_sequence_number();
         }
