@@ -161,47 +161,47 @@ pub struct ServerHello {
 
 impl ServerHello {
     pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (b, legacy_version) = parse::u16("ServerHello legacy_version", b)?;
+        let (b, legacy_version) = parse::u16("ServerHello.legacy_version", b)?;
 
         if legacy_version != 0x0303 {
             log::error!(
-                "ServerHello legacy_version 0x{legacy_version:04X} is not the required value of 0x0303"
+                "ServerHello.legacy_version 0x{legacy_version:04X} is not the required value of 0x0303"
             );
             return Err(AlertDescription::IllegalParameter);
         }
 
-        let (b, random): (&[u8], [u8; 32]) = parse::fixed("ServerHello random", b)?;
+        let (b, random): (&[u8], [u8; 32]) = parse::fixed("ServerHello.random", b)?;
 
         let (b, legacy_session_id_echo) =
-            parse::vec8("ServerHello legacy_session_id_echo", b, 0, 1)?;
+            parse::vec8("ServerHello.legacy_session_id_echo", b, 0, 1)?;
 
         let legacy_session_id_echo: Vec<u8> = legacy_session_id_echo.to_vec();
 
         if legacy_session_id_echo.len() > 32 {
-            log::error!("ServerHello legacy_session_id_echo length is greater than maximum of 32");
+            log::error!("ServerHello.legacy_session_id_echo length is greater than maximum of 32");
             return Err(AlertDescription::DecodeError);
         }
 
-        let (b, cipher_suite) = parse::u16("ServerHello cipher_suite", b)?;
+        let (b, cipher_suite) = parse::u16("ServerHello.cipher_suite", b)?;
 
         let cipher_suite: CipherSuite = match CipherSuite::try_from(cipher_suite) {
             Ok(cs) => cs,
             Err(v) => {
-                log::error!("ServerHello cipher_suite contains unknown value 0x{v:04X}");
+                log::error!("ServerHello.cipher_suite contains unknown value 0x{v:04X}");
                 return Err(AlertDescription::IllegalParameter);
             }
         };
 
-        let (b, legacy_compression_method) = parse::u8("ServerHello legacy_compression_method", b)?;
+        let (b, legacy_compression_method) = parse::u8("ServerHello.legacy_compression_method", b)?;
 
         if legacy_compression_method != 0 {
             log::error!(
-                "ServerHello legacy_compression_method 0x{legacy_compression_method:02X} is not the required value of 0"
+                "ServerHello.legacy_compression_method 0x{legacy_compression_method:02X} is not the required value of 0"
             );
             return Err(AlertDescription::IllegalParameter);
         }
 
-        let (_, exts) = parse::vec16("ServerHello extensions", b, 6, 1)?;
+        let (_, exts) = parse::vec16("ServerHello.extensions", b, 6, 1)?;
 
         let (_, exts) = ServerHelloExtensions::deser(exts)?;
 

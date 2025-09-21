@@ -344,7 +344,7 @@ impl KeySchedule {
     pub fn binder(
         &mut self,
         psk: Option<&[u8; 32]>,
-        truncated_transcript_hash: Sha256,
+        truncated_transcript_hash: &[u8],
     ) -> Array<u8, U32> {
         let binder_key: Hkdf<Sha256> = self.binder_key(psk);
 
@@ -357,7 +357,7 @@ impl KeySchedule {
         let key: Array<u8, U32> = hkdf_expand_label(&binder_key, b"finished", &[]);
 
         let mut hmac = hmac::Hmac::<Sha256>::new_from_slice(&key).unwrap();
-        hmac.update(&truncated_transcript_hash.finalize());
+        hmac.update(truncated_transcript_hash);
         hmac.finalize().into_bytes()
     }
 

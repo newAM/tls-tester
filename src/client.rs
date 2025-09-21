@@ -21,7 +21,7 @@ use sha2::{Digest as _, digest::crypto_common::typenum::U32};
 #[derive(Debug, Clone)]
 pub struct TlsClientBuilder {
     record_size_limit: u16,
-    psks: Vec<Psk>,
+    psk: Option<Psk>,
     server_name: Option<ServerName>,
     trusted_roots: Vec<crate::x509::Certificate>,
     ignore_unknown_ca: bool,
@@ -39,7 +39,7 @@ impl TlsClientBuilder {
     pub fn new() -> Self {
         Self {
             record_size_limit: extension::RecordSizeLimit::LIMIT_MAX,
-            psks: Vec::new(),
+            psk: None,
             server_name: None,
             trusted_roots: Vec::new(),
             ignore_unknown_ca: false,
@@ -69,9 +69,10 @@ impl TlsClientBuilder {
         self
     }
 
+    // need to test multiple PSK handling if offering multiple
     #[must_use]
-    pub fn add_psk(mut self, identity: &[u8], key: [u8; 32]) -> Self {
-        self.psks.push(Psk::new(identity.to_vec(), key));
+    pub fn set_psk(mut self, identity: &[u8], key: [u8; 32]) -> Self {
+        self.psk.replace(Psk::new(identity.to_vec(), key));
         self
     }
 
@@ -127,11 +128,16 @@ impl TlsClientBuilder {
     }
 
     pub fn handshake(self, tcp_stream: TcpStream) -> Result<TlsClientStream, TlsError> {
+        let psks: Vec<Psk> = if let Some(psk) = self.psk {
+            vec![psk]
+        } else {
+            Vec::new()
+        };
         let base: TlsStream = TlsStream {
             stream: tcp_stream,
             key_schedule: KeySchedule::new_client(),
             state: TlsState::WaitServerHello,
-            psks: self.psks,
+            psks,
             buf: VecDeque::new(),
             record_size_limit: self.record_size_limit,
             supported_named_groups: self.supported_named_groups,
@@ -177,7 +183,7 @@ impl TlsClientStream {
         Ok(server_hello)
     }
 
-    fn handle_server_hello(&mut self, server_hello: &ServerHello) -> Result<(), TlsError> {
+    fn handle_server_hello(&mut self, server_hello: &ServerHello) -> Result<Option<Psk>, TlsError> {
         if server_hello.cipher_suite != CipherSuite::TLS_AES_128_GCM_SHA256 {
             log::error!(
                 "ServerHello CipherSuite {:?} is not the expected CipherSuite TLS_AES_128_GCM_SHA256",
@@ -206,6 +212,22 @@ impl TlsClientStream {
             }
         }
 
+        let psk: Option<Psk> = if let Some(selected_identity) =
+            server_hello.exts.psk_selected_identity
+        {
+            if let Some(selected_psk) = self.base.psks.get(usize::from(selected_identity)) {
+                log::debug!("Server selected {selected_psk:?}");
+                Some(selected_psk.clone())
+            } else {
+                log::error!(
+                    "ServerHello.extensions.pre_shared_key of 0x{selected_identity:04x} is not in range of offered keys"
+                );
+                return Err(AlertDescription::UnknownPskIdentity)?;
+            }
+        } else {
+            None
+        };
+
         self.base
             .key_schedule
             .set_public_key(server_hello.exts.key_share.clone());
@@ -213,7 +235,7 @@ impl TlsClientStream {
 
         self.base.set_state(TlsState::WaitEncryptedExtensions);
 
-        Ok(())
+        Ok(psk)
     }
 
     fn read_encrypted_extensions(&mut self) -> Result<(), TlsError> {
@@ -235,8 +257,6 @@ impl TlsClientStream {
         if !ee.is_empty() {
             log::error!("TODO: Client handling of server encrypted extensions unimplemented");
         }
-
-        self.base.set_state(TlsState::WaitCertificate);
 
         Ok(())
     }
@@ -469,22 +489,22 @@ impl TlsClientStream {
             .key_schedule
             .new_secret_key_client(*self.base.supported_named_groups.first().unwrap());
 
-        let ch_build: ClientHelloBuilder =
-            ClientHelloBuilder::new().set_server_name(self.server_name.clone());
-        let data = ch_build.build(&self.base.supported_named_groups, pub_key);
+        let ch_build: ClientHelloBuilder = ClientHelloBuilder::new()
+            .set_psks(self.base.psks.clone())
+            .set_server_name(self.server_name.clone());
+        let data = ch_build.build(
+            &self.base.supported_named_groups,
+            pub_key,
+            &mut self.base.key_schedule,
+        );
         self.base
             .write_unencrypted_record(ContentType::Handshake, &data)?;
-
-        if !self.base.buf.is_empty() {
-            log::error!("Received fragmented records across key changes");
-            return Err(AlertDescription::DecodeError)?;
-        }
 
         self.base.key_schedule.random.replace(ch_build.random());
         self.base.key_schedule.initialize_early_secret();
 
         let server_hello: ServerHello = self.read_server_hello()?;
-        self.handle_server_hello(&server_hello)?;
+        let psk: Option<Psk> = self.handle_server_hello(&server_hello)?;
 
         if !self.base.buf.is_empty() {
             log::error!("Server fragmented record across key changes");
@@ -492,12 +512,18 @@ impl TlsClientStream {
         }
 
         self.read_encrypted_extensions()?;
-        let certificate: Certificate = self.read_certificate()?;
-        self.handle_certificate(&certificate)?;
 
-        let tsh = self.base.key_schedule.transcript_hash().finalize();
-        let certificate_verify: CertificateVerify = self.read_certificate_verify()?;
-        self.handle_certificate_verify(&certificate, &certificate_verify, &tsh)?;
+        if psk.is_some() {
+            self.base.set_state(TlsState::WaitServerFinished)
+        } else {
+            self.base.set_state(TlsState::WaitCertificate);
+            let certificate: Certificate = self.read_certificate()?;
+            self.handle_certificate(&certificate)?;
+
+            let tsh = self.base.key_schedule.transcript_hash().finalize();
+            let certificate_verify: CertificateVerify = self.read_certificate_verify()?;
+            self.handle_certificate_verify(&certificate, &certificate_verify, &tsh)?;
+        }
 
         self.read_server_finished()?;
         self.send_client_finished()?;

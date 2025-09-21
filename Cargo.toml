@@ -26,7 +26,6 @@ p384 = { version = "0.14.0-pre.11", features = [
   "ecdsa",
 ] }
 pem = "3.0.5"
-rand_old = { version = "0.8.5", package = "rand" }
 rand = "0.9.2"
 rsa = { version = "0.10.0-rc.8", features = ["sha2"] }
 sha2 = "0.11.0-rc.2"
@@ -37,5 +36,3 @@ x25519-dalek = { version = "3.0.0-pre.1", features = [
 
 [dev-dependencies]
 stderrlog = "0.6"
-w5500-mqtt = { version = "0.4", features = ["log", "w5500-tls"] }
-w5500-regsim = "0.1"

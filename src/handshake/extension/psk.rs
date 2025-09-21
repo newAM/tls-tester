@@ -11,9 +11,9 @@ use crate::{alert::AlertDescription, parse};
 /// } PskIdentity;
 /// ```
 #[derive(Debug)]
-pub struct PskIdentity {
+pub(crate) struct PskIdentity {
     pub(crate) identity: Vec<u8>,
-    obfuscated_ticket_age: u32,
+    pub(crate) obfuscated_ticket_age: u32,
 }
 
 impl PskIdentity {
@@ -31,6 +31,20 @@ impl PskIdentity {
             },
         ))
     }
+
+    pub fn ser(&self) -> Vec<u8> {
+        let mut ret: Vec<u8> = Vec::new();
+        // length validated in constructors
+        ret.extend_from_slice(
+            u16::try_from(self.identity.len())
+                .unwrap()
+                .to_be_bytes()
+                .as_ref(),
+        );
+        ret.extend_from_slice(self.identity.as_slice());
+        ret.extend_from_slice(self.obfuscated_ticket_age.to_be_bytes().as_ref());
+        ret
+    }
 }
 
 /// # References
@@ -41,8 +55,8 @@ impl PskIdentity {
 /// opaque PskBinderEntry<32..255>;
 /// ```
 #[derive(Debug)]
-pub struct PskBinderEntry {
-    data: Vec<u8>,
+pub(crate) struct PskBinderEntry {
+    pub(crate) data: Vec<u8>,
 }
 
 impl PskBinderEntry {
@@ -54,6 +68,14 @@ impl PskBinderEntry {
                 data: binder_entry.to_vec(),
             },
         ))
+    }
+
+    pub fn ser(&self) -> Vec<u8> {
+        let mut ret: Vec<u8> = Vec::new();
+        // length validated in constructors
+        ret.push(u8::try_from(self.data.len()).unwrap());
+        ret.extend_from_slice(&self.data);
+        ret
     }
 }
 
@@ -156,7 +178,7 @@ impl PskServerHello {
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
-pub enum PskKeyExchangeMode {
+pub(crate) enum PskKeyExchangeMode {
     /// PSK-only key establishment.  In this mode, the server
     /// MUST NOT supply a "key_share" value.
     psk_ke = 0,
@@ -164,6 +186,12 @@ pub enum PskKeyExchangeMode {
     /// client and server MUST supply "key_share" values as described in
     /// Section 4.2.8.
     psk_dhe_ke = 1,
+}
+
+impl From<PskKeyExchangeMode> for u8 {
+    fn from(value: PskKeyExchangeMode) -> Self {
+        value as u8
+    }
 }
 
 impl TryFrom<u8> for PskKeyExchangeMode {
@@ -190,7 +218,7 @@ impl TryFrom<u8> for PskKeyExchangeMode {
 /// } PskKeyExchangeModes;
 /// ```
 #[derive(Debug)]
-pub struct PskKeyExchangeModes {
+pub(crate) struct PskKeyExchangeModes {
     ke_modes: Vec<Result<PskKeyExchangeMode, u8>>,
 }
 

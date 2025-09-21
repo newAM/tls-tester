@@ -11,8 +11,9 @@ use std::collections::HashSet;
 pub use encrypted::EncryptedExtensions;
 pub use key_share::KeyShareServerHello;
 pub(crate) use key_share::{KeyShareClientHello, KeyShareEntry};
-use psk::PskKeyExchangeModes;
-pub use psk::{OfferedPsks, PskServerHello};
+pub(crate) use psk::{
+    OfferedPsks, PskIdentity, PskKeyExchangeMode, PskKeyExchangeModes, PskServerHello,
+};
 pub use record_size_limit::RecordSizeLimit;
 pub(crate) use server_name::ServerName;
 pub use server_name::ServerNameList;
@@ -254,7 +255,7 @@ impl ClientHelloExtensions {
 
                     let offered_psks = OfferedPsks::deser(data)?;
 
-                    log::debug!("< ClientHello PreSharedKey {offered_psks:?}");
+                    log::debug!("< ClientHello PreSharedKey {offered_psks:02X?}");
 
                     pre_shared_key.replace(offered_psks);
                 }
@@ -481,10 +482,9 @@ impl ServerHelloExtension {
 /// ```
 #[derive(Debug)]
 pub struct ServerHelloExtensions {
-    // pre_shared_key: PskServerHello,                   // RFC 8446
-    pub supported_versions: u16, // RFC 8446
-    pub key_share: KeyShareServerHello, // RFC 8446
-                                 // key_share_hello_retry: NamedGroup,                // RFC 8446
+    pub psk_selected_identity: Option<u16>, // RFC 8446
+    pub supported_versions: u16,            // RFC 8446
+    pub key_share: KeyShareServerHello,     // RFC 8446
 }
 
 impl ServerHelloExtensions {
@@ -493,6 +493,7 @@ impl ServerHelloExtensions {
 
         let mut supported_versions: Option<u16> = None;
         let mut key_share: Option<KeyShareServerHello> = None;
+        let mut psk_selected_identity: Option<u16> = None;
 
         while !b.is_empty() {
             let (new_b, extension_type): (_, u16) =
@@ -550,24 +551,24 @@ impl ServerHelloExtensions {
                     return Err(AlertDescription::IllegalParameter);
                 }
                 Ok(ExtensionType::PreSharedKey) => {
-                    // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
-                    // When multiple extensions of different types are present, the
-                    // extensions MAY appear in any order, with the exception of
-                    // "pre_shared_key" (Section 4.2.11) which MUST be the last extension in
-                    // the ClientHello (but can appear anywhere in the ServerHello
-                    // extensions block).
-                    if !b.is_empty() {
-                        log::error!("ServerHello PreSharedKey is not the last extension");
-                        return Err(AlertDescription::UnexpectedMessage);
+                    let (remain, selected_identity) = parse::u16(
+                        "ServerHello.extensions.pre_shared_key.selected_identity",
+                        data,
+                    )?;
+
+                    log::debug!(
+                        "< ServerHello PreSharedKey selected_identity 0x{selected_identity:04x?}"
+                    );
+
+                    if !remain.is_empty() {
+                        log::error!(
+                            "ServerHello.extensions.pre_shared_key.selected_identity contains {} bytes extra data",
+                            remain.len()
+                        );
+                        return Err(AlertDescription::DecodeError);
                     }
 
-                    todo!("implement ServerHello ExtensionType::PreSharedKey");
-
-                    // let offered_psks = OfferedPsks::deser(data)?;
-
-                    // log::debug!("< ServerHello PreSharedKey {offered_psks:?}");
-
-                    // pre_shared_key.replace(offered_psks);
+                    psk_selected_identity.replace(selected_identity);
                 }
                 Ok(ExtensionType::SupportedVersions) => {
                     let data_sized: [u8; 2] = match data.try_into() {
@@ -615,6 +616,7 @@ impl ServerHelloExtensions {
         };
 
         let exts: Self = Self {
+            psk_selected_identity,
             supported_versions,
             key_share,
         };
