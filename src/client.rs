@@ -15,8 +15,10 @@ use crate::{
     record::{self, ContentType},
     tls_version::TlsVersion,
 };
-use hmac::digest::array::Array;
-use sha2::{Digest as _, digest::crypto_common::typenum::U32};
+use sha2::{
+    Digest as _,
+    digest::{array::Array, crypto_common::typenum::U32},
+};
 
 #[derive(Debug, Clone)]
 pub struct TlsClientBuilder {

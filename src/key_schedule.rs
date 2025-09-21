@@ -8,12 +8,14 @@
 //! [RFC 5869]: https://datatracker.ietf.org/doc/html/rfc5869
 
 use crate::{NamedGroup, alert::AlertDescription, handshake::KeyShareEntry};
-use hkdf::Hkdf;
-use hmac::{
-    KeyInit as _, Mac,
-    digest::{
-        array::{Array, ArraySize},
-        consts::U16,
+use hkdf::{
+    Hkdf,
+    hmac::{
+        Hmac, KeyInit as _, Mac,
+        digest::{
+            array::{Array, ArraySize},
+            consts::U16,
+        },
     },
 };
 use rand::rngs::OsRng;
@@ -356,7 +358,7 @@ impl KeySchedule {
         // finished_key = HKDF-Expand-Label(BaseKey, "finished", "", Hash.length)
         let key: Array<u8, U32> = hkdf_expand_label(&binder_key, b"finished", &[]);
 
-        let mut hmac = hmac::Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        let mut hmac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         hmac.update(truncated_transcript_hash);
         hmac.finalize().into_bytes()
     }
@@ -573,7 +575,7 @@ impl KeySchedule {
             &[],
         );
 
-        let mut hmac = hmac::Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        let mut hmac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         hmac.update(transcript_hash);
 
         // Recipients of Finished messages MUST verify that the contents are
@@ -590,7 +592,7 @@ impl KeySchedule {
             &[],
         );
 
-        let mut hmac = hmac::Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        let mut hmac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         hmac.update(&self.transcript_hash_bytes());
 
         // Recipients of Finished messages MUST verify that the contents are
@@ -607,7 +609,7 @@ impl KeySchedule {
             &[],
         );
 
-        let mut hmac = hmac::Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        let mut hmac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         hmac.update(&self.transcript_hash_bytes());
         hmac.finalize().into_bytes()
     }
@@ -619,7 +621,7 @@ impl KeySchedule {
             &[],
         );
 
-        let mut hmac = hmac::Hmac::<Sha256>::new_from_slice(&key).unwrap();
+        let mut hmac = Hmac::<Sha256>::new_from_slice(&key).unwrap();
         hmac.update(&self.transcript_hash_bytes());
         hmac.finalize().into_bytes()
     }

@@ -5,7 +5,7 @@ use std::{
 };
 
 use aes_gcm::{Aes128Gcm, KeyInit as _, aead::AeadInOut as _};
-use hmac::digest::consts::U12;
+use sha2::digest::consts::U12;
 
 use crate::{
     Alert, AlertDescription, GCM_TAG_LEN, Psk, TlsError,

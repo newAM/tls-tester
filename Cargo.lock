@@ -862,7 +862,6 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "hkdf",
- "hmac",
  "jiff",
  "log",
  "p256",

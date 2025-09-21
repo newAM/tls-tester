@@ -10,7 +10,6 @@ repository = "https://github.com/newAM/tls-tester"
 [dependencies]
 aes-gcm = "0.11.0-rc.1"
 hkdf = "0.13.0-rc.2"
-hmac = "0.13.0-rc.2"
 jiff = "0.2.15"
 log = "0.4.27"
 p256 = { version = "0.14.0-pre.11", features = [

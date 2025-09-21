@@ -1,6 +1,8 @@
-use hmac::digest::array::Array;
 use rand::{TryRngCore as _, rngs::OsRng};
-use sha2::{Digest, digest::typenum::U32};
+use sha2::{
+    Digest,
+    digest::{array::Array, typenum::U32},
+};
 
 use crate::{
     Psk,
