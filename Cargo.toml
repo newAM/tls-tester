@@ -24,7 +24,7 @@ p384 = { version = "0.14.0-pre.11", features = [
   "ecdsa-core",
   "ecdsa",
 ] }
-pem = "3.0.5"
+pem = "3.0.6"
 rand = "0.9.2"
 rsa = { version = "0.10.0-rc.9", features = ["sha2"] }
 sha2 = "0.11.0-rc.2"
