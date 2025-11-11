@@ -8,17 +8,21 @@ authors = ["Alex Martens <alex@thinglab.org>"]
 repository = "https://github.com/newAM/tls-tester"
 
 [dependencies]
-aes-gcm = "0.11.0-rc.1"
-hkdf = "0.13.0-rc.2"
+# indirect dependencies that need to be held back
+crypto-bigint = "=0.7.0-rc.9"
+crypto-primes = "=0.7.0-pre.3"
+
+aes-gcm = "=0.11.0-rc.1"
+hkdf = "=0.13.0-rc.2"
 jiff = "0.2.15"
 log = "0.4.27"
-p256 = { version = "0.14.0-rc.0", features = [
+p256 = { version = "=0.14.0-rc.0", features = [
   "ecdh",
   "pem",
   "ecdsa-core",
   "ecdsa",
 ] }
-p384 = { version = "0.14.0-rc.0", features = [
+p384 = { version = "=0.14.0-rc.0", features = [
   "ecdh",
   "pem",
   "ecdsa-core",
@@ -26,9 +30,9 @@ p384 = { version = "0.14.0-rc.0", features = [
 ] }
 pem = "3.0.6"
 rand = "0.9.2"
-rsa = { version = "0.10.0-rc.9", features = ["sha2"] }
-sha2 = "0.11.0-rc.2"
-x25519-dalek = { version = "3.0.0-pre.1", features = [
+rsa = { version = "=0.10.0-rc.9", features = ["sha2"] }
+sha2 = "=0.11.0-rc.2"
+x25519-dalek = { version = "=3.0.0-pre.1", features = [
   "reusable_secrets",
   "os_rng",
 ] }
