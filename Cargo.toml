@@ -12,7 +12,7 @@ repository = "https://github.com/newAM/tls-tester"
 crypto-bigint = "=0.7.0-rc.9"
 crypto-primes = "=0.7.0-pre.3"
 
-aes-gcm = "=0.11.0-rc.1"
+aes-gcm = "=0.11.0-rc.2"
 hkdf = "=0.13.0-rc.2"
 jiff = "0.2.15"
 log = "0.4.27"
