@@ -10,7 +10,7 @@ repository = "https://github.com/newAM/tls-tester"
 [dependencies]
 # indirect dependencies that need to be held back
 crypto-bigint = "=0.7.0-rc.9"
-crypto-primes = "=0.7.0-pre.3"
+crypto-primes = "=0.7.0-pre.4"
 
 aes-gcm = "=0.11.0-rc.1"
 hkdf = "=0.13.0-rc.2"
