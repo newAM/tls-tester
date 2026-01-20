@@ -635,9 +635,9 @@ dependencies = [
 
 [[package]]
 name = "rand_core"
-version = "0.10.0-rc-2"
+version = "0.10.0-rc-4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "104a23e4e8b77312a823b6b5613edbac78397e2f34320bc7ac4277013ec4478e"
+checksum = "43bb1e3655c24705492d72208c9bacdefe07c30c14b8f7664c556a3e1953b72c"
 
 [[package]]
 name = "rfc6979"

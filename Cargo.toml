@@ -9,7 +9,7 @@ repository = "https://github.com/newAM/tls-tester"
 
 [dependencies]
 # dependencies that need to be held back for compatibility
-rand_core = "=0.10.0-rc-2"
+rand_core = "=0.10.0-rc-4"
 
 aes-gcm = "=0.11.0-rc.2"
 hkdf = "=0.13.0-rc.3"
