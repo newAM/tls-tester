@@ -1,4 +1,5 @@
-use rand::{TryRngCore as _, rngs::OsRng};
+use rand::TryRng as _;
+use rand::rngs::SysRng;
 use sha2::{
     Digest,
     digest::{array::Array, typenum::U32},
@@ -118,7 +119,7 @@ pub(crate) struct ClientHelloBuilder {
 impl ClientHelloBuilder {
     pub fn new() -> Self {
         let mut random: [u8; 32] = [0; 32];
-        OsRng.try_fill_bytes(&mut random).expect("OsRng failure");
+        SysRng.try_fill_bytes(&mut random).expect("SysRng failure");
         Self {
             random,
             server_name: None,

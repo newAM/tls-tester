@@ -17,7 +17,7 @@ use crate::{
 };
 use sha2::{
     Digest as _,
-    digest::{array::Array, crypto_common::typenum::U32},
+    digest::{array::Array, typenum::U32},
 };
 
 #[derive(Debug, Clone)]
