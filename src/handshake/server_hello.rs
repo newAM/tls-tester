@@ -2,7 +2,8 @@ use super::{
     KeyShareEntry, NamedGroup,
     extension::{PskServerHello, ServerHelloExtension, ServerHelloExtensions},
 };
-use rand::{TryRngCore as _, rngs::OsRng};
+use rand::TryRng as _;
+use rand::rngs::SysRng;
 
 use crate::{AlertDescription, cipher_suite::CipherSuite, parse, tls_version::TlsVersion};
 
@@ -46,7 +47,7 @@ impl ServerHelloBuilder {
         selected_identity: Option<u16>,
     ) -> Self {
         let mut random: [u8; 32] = [0; 32];
-        OsRng.try_fill_bytes(&mut random).expect("OsRng failure");
+        SysRng.try_fill_bytes(&mut random).expect("SysRng failure");
 
         let mut extensions: Vec<ServerHelloExtension> = Vec::with_capacity(3);
 

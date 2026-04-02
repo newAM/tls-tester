@@ -18,7 +18,7 @@ use hkdf::{
         },
     },
 };
-use rand::rngs::OsRng;
+use p256::elliptic_curve::Generate as _;
 use sha2::{
     Digest, Sha256,
     digest::{
@@ -241,8 +241,10 @@ impl KeySchedule {
             }
             NamedGroup::secp256r1 => {
                 let (private, public) = {
-                    let private_key = p256::ecdh::EphemeralSecret::try_from_rng(&mut OsRng)
-                        .expect("OsRng failure");
+                    let private_key = {
+                        let mut rng = rand::rng();
+                        p256::ecdh::EphemeralSecret::generate_from_rng(&mut rng)
+                    };
                     let public_key = private_key.public_key();
 
                     (private_key, public_key)

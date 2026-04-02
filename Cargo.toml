@@ -8,30 +8,27 @@ authors = ["Alex Martens <alex@thinglab.org>"]
 repository = "https://github.com/newAM/tls-tester"
 
 [dependencies]
-# dependencies that need to be held back for compatibility
-rand_core = "=0.10.0-rc-2"
-
-aes-gcm = "=0.11.0-rc.2"
-hkdf = "=0.13.0-rc.3"
-jiff = "0.2.15"
-log = "0.4.27"
-p256 = { version = "=0.14.0-rc.1", features = [
+aes-gcm = "=0.11.0-rc.3"
+hkdf = "0.13.0"
+jiff = "0.2.23"
+log = "0.4.29"
+p256 = { version = "=0.14.0-rc.8", features = [
   "ecdh",
   "pem",
   "ecdsa-core",
   "ecdsa",
 ] }
-p384 = { version = "=0.14.0-rc.1", features = [
+p384 = { version = "=0.14.0-rc.8", features = [
   "ecdh",
   "pem",
   "ecdsa-core",
   "ecdsa",
 ] }
 pem = "3.0.6"
-rand = "0.10.0-rc.5"
-rsa = { version = "=0.10.0-rc.10", features = ["sha2"] }
-sha2 = "=0.11.0-rc.3"
-x25519-dalek = { version = "=3.0.0-pre.2", features = [
+rand = "0.10.0"
+rsa = { version = "=0.10.0-rc.17", features = ["sha2"] }
+sha2 = "0.11.0"
+x25519-dalek = { version = "=3.0.0-pre.6", features = [
   "getrandom",
   "reusable_secrets",
 ] }
