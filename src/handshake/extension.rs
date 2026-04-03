@@ -313,6 +313,10 @@ impl ClientHelloExtensions {
         }
 
         if signature_algorithms_cert.is_none() {
+            // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.3
+            // If no "signature_algorithms_cert" extension is
+            // present, then the "signature_algorithms" extension also applies to
+            // signatures appearing in certificates.
             signature_algorithms_cert = signature_algorithms.clone();
         }
 
