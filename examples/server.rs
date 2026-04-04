@@ -3,7 +3,7 @@ use tls_tester::{ServerCertificates, TlsServerBuilder, TlsServerStream};
 use std::{
     io::{Read as _, Write as _},
     net::TcpListener,
-    process::{Command, Output},
+    process::{Child, Command},
 };
 
 fn main() {
@@ -13,14 +13,15 @@ fn main() {
         .init()
         .unwrap();
 
-    let certs: ServerCertificates = ServerCertificates::from_secpr256r1_pem("cert.pem", "key.pem")
-        .expect("Invalid certificates");
+    let certs: ServerCertificates =
+        ServerCertificates::from_secpr256r1_pem("cert_prime256v1.pem", "key_prime256v1.pem")
+            .expect("Invalid certificates");
 
     let listener: TcpListener = TcpListener::bind("127.0.0.1:12345").unwrap();
 
     let curl_thread = std::thread::spawn(move || {
         log::info!("sending http request with curl");
-        let output: Output = Command::new("curl")
+        let mut output: Child = Command::new("curl")
             .arg("https://127.0.0.1:12345")
             .arg("--tlsv1.3")
             .arg("--curves")
@@ -32,16 +33,10 @@ fn main() {
             .arg("5")
             .arg("-v")
             .arg("--http1.1")
-            .output()
+            .spawn()
             .unwrap();
 
-        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        if !stdout.is_empty() {
-            panic!("{}", String::from_utf8_lossy(&output.stdout));
-        }
-
-        output.status.success()
+        output.wait().unwrap().success()
     });
 
     // openssl s_client -connect 127.0.0.1:12345 -tls1_3 -debug -curves secp256r1 -psk 2f42ace2b6be1681b3d2fcdd4bb57b4ffe3484ee77fdaa8e216e3272cd78259d

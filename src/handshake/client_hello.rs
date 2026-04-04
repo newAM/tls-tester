@@ -6,7 +6,7 @@ use sha2::{
 };
 
 use crate::{
-    Psk,
+    Psk, SignatureScheme,
     handshake::{
         HandshakeHeader,
         extension::{ExtensionType, KeyShareClientHello, PskIdentity, PskKeyExchangeMode},
@@ -146,6 +146,7 @@ impl ClientHelloBuilder {
     pub fn build(
         &self,
         named_groups: &[NamedGroup],
+        signature_algorithms: &[SignatureScheme],
         pub_key: KeyShareEntry,
         key_schedule: &mut KeySchedule,
     ) -> Vec<u8> {
@@ -211,7 +212,7 @@ impl ClientHelloBuilder {
         );
         data.extend_from_slice(&supported_groups);
 
-        let signature_algorithms: Vec<u8> = ser_signature_scheme_list();
+        let signature_algorithms: Vec<u8> = ser_signature_scheme_list(signature_algorithms);
         data.extend_from_slice(ExtensionType::SignatureAlgorithms.to_be_bytes().as_ref());
         data.extend_from_slice(
             u16::try_from(signature_algorithms.len())

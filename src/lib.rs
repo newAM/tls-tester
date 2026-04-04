@@ -17,6 +17,7 @@ pub use alert::{Alert, AlertDescription, AlertLevel};
 pub use client::{TlsClientBuilder, TlsClientStream};
 pub use error::TlsError;
 pub use handshake::NamedGroup;
+pub use handshake::extension::SignatureScheme;
 pub use server::{ServerCertificates, TlsServerBuilder, TlsServerStream};
 
 pub(crate) const GCM_TAG_LEN: usize = 16;

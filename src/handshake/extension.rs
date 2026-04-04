@@ -17,7 +17,8 @@ pub(crate) use psk::{
 pub use record_size_limit::RecordSizeLimit;
 pub(crate) use server_name::ServerName;
 pub use server_name::ServerNameList;
-use signature_scheme::{SignatureScheme, deser_signature_scheme_list};
+pub use signature_scheme::SignatureScheme;
+use signature_scheme::deser_signature_scheme_list;
 pub use supported_versions::SupportedVersionsClientHello;
 
 use crate::{alert::AlertDescription, parse, tls_version::TlsVersion};
@@ -141,6 +142,7 @@ pub(crate) struct ClientHelloExtensions {
     pub server_name_list: Option<ServerNameList>,
     pub supported_groups: Vec<NamedGroup>,
     pub signature_algorithms: Option<Vec<SignatureScheme>>,
+    pub signature_algorithms_cert: Option<Vec<SignatureScheme>>,
     pub pre_shared_key: Option<OfferedPsks>,
     pub psk_key_exchange_modes: Option<PskKeyExchangeModes>,
     pub record_size_limit: Option<RecordSizeLimit>,
@@ -349,12 +351,34 @@ impl ClientHelloExtensions {
             }
         }
 
-        if let Some(cert_signature_algorithms) = signature_algorithms_cert {
-            if !cert_signature_algorithms.contains(&SignatureScheme::ecdsa_secp256r1_sha256) {
-                log::error!(
-                    "Client does not supoort required ecdsa_secp256r1_sha256 signature algorithm"
+        if let Some(signature_algorithms) = &signature_algorithms {
+            if !signature_algorithms.contains(&SignatureScheme::rsa_pss_rsae_sha256) {
+                log::warn!(
+                    "ClientHello signature_algorithms does not support required SignatureScheme rsa_pss_rsae_sha256"
                 );
-                return Err(AlertDescription::HandshakeFailure);
+            }
+            if !signature_algorithms.contains(&SignatureScheme::ecdsa_secp256r1_sha256) {
+                log::warn!(
+                    "ClientHello signature_algorithms does not support required SignatureScheme ecdsa_secp256r1_sha256"
+                );
+            }
+        }
+
+        if let Some(signature_algorithms_cert) = &signature_algorithms_cert {
+            if !signature_algorithms_cert.contains(&SignatureScheme::rsa_pkcs1_sha256) {
+                log::warn!(
+                    "ClientHello signature_algorithms_cert does not support required SignatureScheme rsa_pkcs1_sha256"
+                );
+            }
+            if !signature_algorithms_cert.contains(&SignatureScheme::rsa_pss_rsae_sha256) {
+                log::warn!(
+                    "ClientHello signature_algorithms_cert does not support required SignatureScheme rsa_pss_rsae_sha256"
+                );
+            }
+            if !signature_algorithms_cert.contains(&SignatureScheme::ecdsa_secp256r1_sha256) {
+                log::warn!(
+                    "ClientHello signature_algorithms_cert does not support required SignatureScheme ecdsa_secp256r1_sha256"
+                );
             }
         } else if pre_shared_key.is_none() {
             // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.3
@@ -406,6 +430,7 @@ impl ClientHelloExtensions {
             server_name_list,
             supported_groups,
             signature_algorithms,
+            signature_algorithms_cert,
             pre_shared_key,
             psk_key_exchange_modes,
             record_size_limit,

@@ -28,6 +28,7 @@ pub struct TlsClientBuilder {
     trusted_roots: Vec<crate::x509::Certificate>,
     ignore_unknown_ca: bool,
     supported_named_groups: Vec<NamedGroup>,
+    supported_signature_algorithms: Vec<SignatureScheme>,
 }
 
 impl Default for TlsClientBuilder {
@@ -46,16 +47,30 @@ impl TlsClientBuilder {
             trusted_roots: Vec::new(),
             ignore_unknown_ca: false,
             supported_named_groups: NamedGroup::default_groups(),
+            supported_signature_algorithms: SignatureScheme::default_signature_algorithms(),
         }
     }
 
     #[must_use]
-    pub fn set_supported_name_groups(mut self, named_groups: Vec<NamedGroup>) -> Self {
+    pub fn set_supported_named_groups(mut self, named_groups: Vec<NamedGroup>) -> Self {
         assert!(
             !named_groups.is_empty(),
             "At least one group must be supported"
         );
         self.supported_named_groups = named_groups;
+        self
+    }
+
+    #[must_use]
+    pub fn set_supported_signature_algorithms(
+        mut self,
+        signature_algorithms: Vec<SignatureScheme>,
+    ) -> Self {
+        assert!(
+            !signature_algorithms.is_empty(),
+            "At least one signature algorithm must be supported"
+        );
+        self.supported_signature_algorithms = signature_algorithms;
         self
     }
 
@@ -143,6 +158,7 @@ impl TlsClientBuilder {
             buf: VecDeque::new(),
             record_size_limit: self.record_size_limit,
             supported_named_groups: self.supported_named_groups,
+            supported_signature_algorithms: self.supported_signature_algorithms,
         };
 
         let mut ret = TlsClientStream {
@@ -401,21 +417,30 @@ impl TlsClientStream {
             }
         };
 
-        if verify.algorithm != SignatureScheme::ecdsa_secp256r1_sha256 {
-            // TODO: implement required signature algorithms
+        if !self
+            .base
+            .supported_signature_algorithms
+            .contains(&verify.algorithm)
+        {
             log::error!(
-                "Client does not implement server's signature scheme: {:?}",
-                verify.algorithm
+                "Server sent a certificate verify algorithm {:?} which is unsupported by the client, client supports {:?}",
+                verify.algorithm,
+                self.base.supported_signature_algorithms,
             );
             Err(AlertDescription::InternalError)?
         }
 
-        end_entity_certificate
-            .data
-            .tbs_certificate
-            .subject_public_key_info
-            .subject_public_key
-            .verify::<sha2::Sha256>(&to_verify, &verify.signature)?;
+        match verify.algorithm {
+            SignatureScheme::ecdsa_secp256r1_sha256 | SignatureScheme::rsa_pss_rsae_sha256 => {
+                end_entity_certificate
+                    .data
+                    .tbs_certificate
+                    .subject_public_key_info
+                    .subject_public_key
+                    .verify::<sha2::Sha256>(&to_verify, &verify.signature)?;
+            }
+            _ => unimplemented!(),
+        }
 
         Ok(())
     }
@@ -496,6 +521,7 @@ impl TlsClientStream {
             .set_server_name(self.server_name.clone());
         let data = ch_build.build(
             &self.base.supported_named_groups,
+            &self.base.supported_signature_algorithms,
             pub_key,
             &mut self.base.key_schedule,
         );

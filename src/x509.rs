@@ -824,7 +824,7 @@ impl PublicKey {
         signature: &[u8],
     ) -> Result<(), AlertDescription>
     where
-        D: Digest + AssociatedOid,
+        D: Digest + AssociatedOid + sha2::digest::FixedOutputReset,
     {
         let is_ok: bool = match self {
             PublicKey::Prime256v1(verifying_key) => {
@@ -870,20 +870,19 @@ impl PublicKey {
                 }
             }
             PublicKey::Rsa(public_key) => {
-                let signature: rsa::pkcs1v15::Signature = match rsa::pkcs1v15::Signature::try_from(
-                    signature,
-                ) {
+                let signature: rsa::pss::Signature = match rsa::pss::Signature::try_from(signature)
+                {
                     Ok(signature) => signature,
                     Err(e) => {
                         log::error!(
-                            "Certificate signature format does not match RSA PKCS #1 v1.5: {e:?}"
+                            "Certificate signature format does not match RSA PKCS #8: {e:?}"
                         );
                         return Err(AlertDescription::BadCertificate)?;
                     }
                 };
 
-                let verifying_key: rsa::pkcs1v15::VerifyingKey<D> =
-                    rsa::pkcs1v15::VerifyingKey::new(public_key.clone());
+                let verifying_key: rsa::pss::VerifyingKey<D> =
+                    rsa::pss::VerifyingKey::new(public_key.clone());
 
                 let result = verifying_key.verify(to_verify, &signature);
 
@@ -992,7 +991,7 @@ impl SubjectPublicKeyInfo {
                     return None;
                 }
             }
-            // rsaEncryption (PKCS #1)
+            // rsaEncryption (PKCS #8)
             "1.2.840.113549.1.1.1" => {
                 if algorithm.parameters.is_some() {
                     log::error!(

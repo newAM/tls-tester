@@ -1,6 +1,6 @@
 use tls_tester::{
-    NamedGroup, ServerCertificates, TlsClientBuilder, TlsClientStream, TlsServerBuilder,
-    TlsServerStream,
+    NamedGroup, ServerCertificates, SignatureScheme, TlsClientBuilder, TlsClientStream,
+    TlsServerBuilder, TlsServerStream,
 };
 
 use std::{
@@ -8,17 +8,31 @@ use std::{
     net::{Ipv4Addr, SocketAddrV4, TcpListener, TcpStream},
 };
 
-fn loopback_with_named_groups(named_groups: Vec<NamedGroup>) {
+// openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -keyout key_prime256v1.pem -out cert_prime256v1.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
+fn certs_ecdsa_secp256r1_sha256() -> ServerCertificates {
+    ServerCertificates::from_secpr256r1_pem("cert_prime256v1.pem", "key_prime256v1.pem")
+        .expect("Invalid certificates")
+}
+
+// openssl req -x509 -newkey rsa:2048 -nodes -keyout key_rsa_pss_rsae_sha256.pem -out cert_rsa_pss_rsae_sha256.pem -sha256 -days 3650 -subj "/CN=localhost"
+fn certs_rsa_pss_rsae_sha256() -> ServerCertificates {
+    ServerCertificates::from_rsa_pss_rsae_sha256(
+        "cert_rsa_pss_rsae_sha256.pem",
+        "key_rsa_pss_rsae_sha256.pem",
+    )
+    .expect("Invalid certificates")
+}
+
+fn loopback_with(
+    signature_algorithms: Vec<SignatureScheme>,
+    named_groups: Vec<NamedGroup>,
+    certs: ServerCertificates,
+) {
     stderrlog::new()
         .verbosity(4)
         .timestamp(stderrlog::Timestamp::Microsecond)
         .init()
         .ok();
-
-    // gen certs:
-    // openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
-    let certs: ServerCertificates = ServerCertificates::from_secpr256r1_pem("cert.pem", "key.pem")
-        .expect("Invalid certificates");
 
     let listener: TcpListener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port: u16 = listener
@@ -51,7 +65,8 @@ fn loopback_with_named_groups(named_groups: Vec<NamedGroup>) {
     log::info!("Handshaking");
     let mut tls_stream: TlsClientStream = TlsClientBuilder::new()
         .ignore_unknown_ca(true)
-        .set_supported_name_groups(named_groups)
+        .set_supported_named_groups(named_groups)
+        .set_supported_signature_algorithms(signature_algorithms)
         .handshake(tcp_stream)
         .expect("TLS handshake failed");
 
@@ -67,12 +82,20 @@ fn loopback_with_named_groups(named_groups: Vec<NamedGroup>) {
 
 #[test]
 fn loopback_secp256r1() {
-    loopback_with_named_groups(vec![NamedGroup::secp256r1]);
+    loopback_with(
+        vec![SignatureScheme::ecdsa_secp256r1_sha256],
+        vec![NamedGroup::secp256r1],
+        certs_ecdsa_secp256r1_sha256(),
+    );
 }
 
 #[test]
 fn loopback_x25519() {
-    loopback_with_named_groups(vec![NamedGroup::x25519]);
+    loopback_with(
+        vec![SignatureScheme::ecdsa_secp256r1_sha256],
+        vec![NamedGroup::x25519],
+        certs_ecdsa_secp256r1_sha256(),
+    );
 }
 
 #[test]
@@ -84,9 +107,10 @@ fn loopback_psk() {
         .ok();
 
     // gen certs:
-    // openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -keyout key.pem -out cert.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
-    let certs: ServerCertificates = ServerCertificates::from_secpr256r1_pem("cert.pem", "key.pem")
-        .expect("Invalid certificates");
+    // openssl req -x509 -newkey ec:<(openssl ecparam -name prime256v1) -keyout key_prime256v1.pem -out cert_prime256v1.pem -sha256 -days 3650 -nodes -subj "/CN=localhost"
+    let certs: ServerCertificates =
+        ServerCertificates::from_secpr256r1_pem("cert_prime256v1.pem", "key_prime256v1.pem")
+            .expect("Invalid certificates");
 
     let listener: TcpListener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port: u16 = listener
@@ -140,4 +164,13 @@ fn loopback_psk() {
 
     assert_eq!(&server_rx_data, b"ping");
     assert_eq!(&client_rx_data, b"pong");
+}
+
+#[test]
+fn loopback_rsa_pss_rsae_sha256() {
+    loopback_with(
+        vec![SignatureScheme::rsa_pss_rsae_sha256],
+        vec![NamedGroup::secp256r1, NamedGroup::x25519],
+        certs_rsa_pss_rsae_sha256(),
+    );
 }

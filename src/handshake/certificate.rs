@@ -151,9 +151,9 @@ pub(crate) struct CertificateVerify {
 }
 
 impl CertificateVerify {
-    pub fn from_ecdsa_secp256r1_sha256(signature: &[u8]) -> Self {
+    pub fn new(algorithm: SignatureScheme, signature: &[u8]) -> Self {
         Self {
-            algorithm: SignatureScheme::ecdsa_secp256r1_sha256,
+            algorithm,
             signature: signature.to_vec(),
         }
     }

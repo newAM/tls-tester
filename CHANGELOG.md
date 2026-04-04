@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Added a client implementation.
 - Added all recommended key exchange algorithms: `X25519`.
+- Added all required digital signature algorithms: `rsa_pkcs1_sha256`.
+- Added all required certificate signature algorithms: `rsa_pss_rsae_sha256` and `rsa_pkcs1_sha256`.
 
 ### Changed
 

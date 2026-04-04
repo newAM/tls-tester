@@ -15,12 +15,13 @@ use crate::{
     handshake::{
         self, CertificateVerify, ClientHello, HandshakeHeader, HandshakeType, KeyShareEntry,
         NamedGroup, ServerHelloBuilder,
-        extension::{self, EncryptedExtensions},
+        extension::{self, EncryptedExtensions, signature_scheme::SignatureScheme},
     },
     key_schedule::KeySchedule,
     record::{self, ContentType},
 };
 use p256::pkcs8::DecodePrivateKey as _;
+use rsa::signature::{RandomizedSigner, SignatureEncoding};
 use sha2::Digest as _;
 
 fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
@@ -40,10 +41,18 @@ fn pem_to_der(pem: &str) -> Option<Vec<u8>> {
     Some(parsed.into_contents())
 }
 
+// Used for the CertificateVerify
+#[derive(Debug, Clone)]
+#[allow(non_camel_case_types)]
+pub(crate) enum ServerCertificateSigningKey {
+    rsa_pss_rsae_sha256(rsa::pss::BlindedSigningKey<sha2::Sha256>),
+    ecdsa_secp256r1_sha256(p256::ecdsa::SigningKey),
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerCertificates {
     public_der: Vec<u8>,
-    signing_key: p256::ecdsa::SigningKey,
+    signing_key: ServerCertificateSigningKey,
 }
 
 impl ServerCertificates {
@@ -74,7 +83,7 @@ impl ServerCertificates {
 
         let public_der: Vec<u8> = pem_to_der(&public)?;
 
-        // larger sizes are valid by TLS spec, u16 is an easier cutoff for now
+        // TODO: larger sizes are valid by TLS spec, u16 is an easier cutoff for now
         if u16::try_from(public_der.len()).is_err() {
             log::error!("Certificate length of {} is too long", public_der.len());
             return None;
@@ -82,13 +91,63 @@ impl ServerCertificates {
 
         Some(Self {
             public_der,
-            signing_key,
+            signing_key: ServerCertificateSigningKey::ecdsa_secp256r1_sha256(signing_key),
         })
     }
 
-    pub(crate) fn sign(&self, data: &[u8]) -> p256::ecdsa::Signature {
-        // as far as I know the unwrap will never occur
-        self.signing_key.sign_recoverable(data).unwrap().0
+    pub fn from_rsa_pss_rsae_sha256<P: Into<PathBuf>>(public: P, private: P) -> Option<Self> {
+        let public: String = match fs::read_to_string(public.into()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("Failed to read public key into string: {e}");
+                return None;
+            }
+        };
+        let private: String = match fs::read_to_string(private.into()) {
+            Ok(p) => p,
+            Err(e) => {
+                log::error!("Failed to read private key into string: {e}");
+                return None;
+            }
+        };
+
+        let secret_key: rsa::pss::BlindedSigningKey<sha2::Sha256> =
+            match rsa::pkcs8::DecodePrivateKey::from_pkcs8_pem(&private) {
+                Ok(key) => key,
+                Err(e) => {
+                    log::error!("Private key is not a valid rsa in pkcs1 pem format: {e}");
+                    return None;
+                }
+            };
+        // let signing_key: rsa::pss::BlindedSigningKey<sha2::Sha256> =
+        //     rsa::pss::BlindedSigningKey::<sha2::Sha256>::new(secret_key);
+
+        let public_der: Vec<u8> = pem_to_der(&public)?;
+
+        // TODO: larger sizes are valid by TLS spec, u16 is an easier cutoff for now
+        if u16::try_from(public_der.len()).is_err() {
+            log::error!("Certificate length of {} is too long", public_der.len());
+            return None;
+        }
+
+        Some(Self {
+            public_der,
+            signing_key: ServerCertificateSigningKey::rsa_pss_rsae_sha256(secret_key),
+        })
+    }
+
+    pub(crate) fn sign(&self, data: &[u8]) -> Vec<u8> {
+        match &self.signing_key {
+            ServerCertificateSigningKey::rsa_pss_rsae_sha256(signing_key) => signing_key
+                .sign_with_rng(&mut rand::rngs::ThreadRng::default(), data)
+                .to_vec(),
+            ServerCertificateSigningKey::ecdsa_secp256r1_sha256(signing_key) => signing_key
+                .sign_recoverable(data)
+                .unwrap()
+                .0
+                .to_der()
+                .to_vec(),
+        }
     }
 }
 
@@ -97,6 +156,7 @@ pub struct TlsServerBuilder {
     record_size_limit: u16,
     psks: Vec<Psk>,
     supported_named_groups: Vec<NamedGroup>,
+    supported_signature_algorithms: Vec<SignatureScheme>,
 }
 
 impl Default for TlsServerBuilder {
@@ -112,16 +172,30 @@ impl TlsServerBuilder {
             record_size_limit: extension::RecordSizeLimit::LIMIT_MAX,
             psks: Vec::new(),
             supported_named_groups: NamedGroup::default_groups(),
+            supported_signature_algorithms: SignatureScheme::default_signature_algorithms(),
         }
     }
 
     #[must_use]
-    pub fn set_supported_name_groups(mut self, named_groups: Vec<NamedGroup>) -> Self {
+    pub fn set_supported_named_groups(mut self, named_groups: Vec<NamedGroup>) -> Self {
         assert!(
             !named_groups.is_empty(),
             "At least one group must be supported"
         );
         self.supported_named_groups = named_groups;
+        self
+    }
+
+    #[must_use]
+    pub fn set_supported_signature_algorithms(
+        mut self,
+        signature_algorithms: Vec<SignatureScheme>,
+    ) -> Self {
+        assert!(
+            !signature_algorithms.is_empty(),
+            "At least one signature algorithm must be supported"
+        );
+        self.supported_signature_algorithms = signature_algorithms;
         self
     }
 
@@ -150,6 +224,7 @@ impl TlsServerBuilder {
             buf: VecDeque::new(),
             record_size_limit: self.record_size_limit,
             supported_named_groups: self.supported_named_groups,
+            supported_signature_algorithms: self.supported_signature_algorithms,
         };
         let mut ret = TlsServerStream {
             base,
@@ -200,10 +275,11 @@ impl TlsServerStream {
         Ok(client_hello)
     }
 
+    #[allow(clippy::type_complexity)]
     fn handle_client_hello(
         &mut self,
         client_hello: &mut ClientHello,
-    ) -> Result<(Option<[u8; 32]>, Option<u16>), TlsError> {
+    ) -> Result<(Option<[u8; 32]>, Option<u16>, Option<SignatureScheme>), TlsError> {
         // only needed for NSS key logging
         self.base.key_schedule.random.replace(client_hello.random);
 
@@ -228,7 +304,7 @@ impl TlsServerStream {
             log::info!("ClientHello has an empty client_shares vector");
             // this is a hack, removing the client shares will force a hello retry
             client_hello.exts.key_share.client_shares = vec![];
-            return Ok((None, None));
+            return Ok((None, None, None));
         }
 
         let named_group: NamedGroup = match client_hello
@@ -252,6 +328,7 @@ impl TlsServerStream {
 
         let mut selected_identity: Option<u16> = None;
         let mut binder_key: Option<[u8; 32]> = None;
+        let mut signature_algorithm: Option<SignatureScheme> = None;
 
         if let Some(client_psks) = client_hello.exts.pre_shared_key.as_ref() {
             for (client_psk_idx, client_psk) in client_psks.identities.iter().enumerate() {
@@ -270,9 +347,29 @@ impl TlsServerStream {
                 log::error!("Received PSK with unknown identity");
                 return Err(AlertDescription::UnknownPskIdentity)?;
             }
+        } else {
+            // validated to exist in ClientHelloExtensions::deser
+            let signature_algorithms = client_hello.exts.signature_algorithms.as_ref().unwrap();
+
+            // Find the first algorithm that the client lists that is also supported by the server
+            if let Some(&chosen) = signature_algorithms.iter().find(|&&client_alg| {
+                self.base
+                    .supported_signature_algorithms
+                    .contains(&client_alg)
+            }) {
+                signature_algorithm.replace(chosen);
+                log::debug!("Selected signature algorithm {signature_algorithm:?}");
+            } else {
+                log::error!(
+                    "Client does not have any signature algorithms that the server supports, client supports {:?}, server supports {:?}",
+                    signature_algorithms,
+                    self.base.supported_signature_algorithms
+                );
+                return Err(AlertDescription::HandshakeFailure)?;
+            }
         }
 
-        Ok((binder_key, selected_identity))
+        Ok((binder_key, selected_identity, signature_algorithm))
     }
 
     // FIXME: this function name is misleading, it does more than just reading.
@@ -331,8 +428,11 @@ impl TlsServerStream {
     fn handshake_alertable(&mut self) -> Result<(), TlsError> {
         let mut client_hello: ClientHello = self.read_client_hello()?;
 
-        let (mut binder_key, mut selected_identity): (Option<[u8; 32]>, Option<u16>) =
-            self.handle_client_hello(&mut client_hello)?;
+        let (mut binder_key, mut selected_identity, mut signature_scheme): (
+            Option<[u8; 32]>,
+            Option<u16>,
+            Option<SignatureScheme>,
+        ) = self.handle_client_hello(&mut client_hello)?;
 
         let key_share: Option<KeyShareEntry> = client_hello
             .exts
@@ -383,7 +483,8 @@ impl TlsServerStream {
             self.base.set_state(TlsState::WaitClientHelloRetry);
 
             client_hello = self.read_client_hello()?;
-            (binder_key, selected_identity) = self.handle_client_hello(&mut client_hello)?;
+            (binder_key, selected_identity, signature_scheme) =
+                self.handle_client_hello(&mut client_hello)?;
 
             let key_share: Option<KeyShareEntry> = client_hello
                 .exts
@@ -469,8 +570,7 @@ impl TlsServerStream {
 
             let certificate_verify: Vec<u8> = HandshakeHeader::prepend_header(
                 HandshakeType::CertificateVerify,
-                &CertificateVerify::from_ecdsa_secp256r1_sha256(&signature.to_der().to_bytes())
-                    .ser(),
+                &CertificateVerify::new(signature_scheme.unwrap(), &signature).ser(),
             );
 
             self.base

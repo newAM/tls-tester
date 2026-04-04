@@ -26,9 +26,6 @@ A tool for testing [TLS 1.3] implementation compliance.
 ## Limitations
 
 - [Compliance](https://datatracker.ietf.org/doc/html/rfc8446#section-9) limitations
-  - Does not implement all required digital signature algorithms, missing:
-    - `rsa_pkcs1_sha256`
-    - `rsa_pss_rsae_sha256`
   - Does not implement all recommended cipher suites, missing:
     - `TLS_AES_256_GCM_SHA384`
     - `TLS_CHACHA20_POLY1305_SHA256`

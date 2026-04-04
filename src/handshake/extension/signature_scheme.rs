@@ -42,7 +42,7 @@ use crate::{alert::AlertDescription, parse};
 #[repr(u16)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(non_camel_case_types)]
-pub(crate) enum SignatureScheme {
+pub enum SignatureScheme {
     // RSASSA-PKCS1-v1_5 algorithms
     rsa_pkcs1_sha256 = 0x0401,
     rsa_pkcs1_sha384 = 0x0501,
@@ -68,8 +68,12 @@ pub(crate) enum SignatureScheme {
 }
 
 impl SignatureScheme {
-    pub fn to_be_bytes(self) -> [u8; 2] {
+    pub(crate) fn to_be_bytes(self) -> [u8; 2] {
         u16::from(self).to_be_bytes()
+    }
+
+    pub(crate) fn default_signature_algorithms() -> Vec<Self> {
+        vec![Self::ecdsa_secp256r1_sha256, Self::rsa_pss_rsae_sha256]
     }
 }
 
@@ -137,13 +141,19 @@ pub(crate) fn deser_signature_scheme_list(
     Ok(ret)
 }
 
-pub(crate) fn ser_signature_scheme_list() -> Vec<u8> {
+pub(crate) fn ser_signature_scheme_list(schemes: &[SignatureScheme]) -> Vec<u8> {
+    let scheme_len: u16 = schemes
+        .len()
+        .checked_mul(2)
+        .expect("Too many signature schemes")
+        .try_into()
+        .expect("Too many signature schemes");
+
     let mut ret: Vec<u8> = Vec::new();
-    ret.extend_from_slice(2_u16.to_be_bytes().as_ref());
-    ret.extend_from_slice(
-        SignatureScheme::ecdsa_secp256r1_sha256
-            .to_be_bytes()
-            .as_ref(),
-    );
+    ret.extend_from_slice(scheme_len.to_be_bytes().as_ref());
+    schemes
+        .iter()
+        .for_each(|ss| ret.extend_from_slice(ss.to_be_bytes().as_ref()));
+
     ret
 }

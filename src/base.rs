@@ -8,8 +8,8 @@ use aes_gcm::{Aes128Gcm, KeyInit as _, aead::AeadInOut as _};
 use sha2::digest::consts::U12;
 
 use crate::{
-    Alert, AlertDescription, GCM_TAG_LEN, Psk, TlsError,
-    handshake::{HandshakeHeader, NamedGroup},
+    Alert, AlertDescription, GCM_TAG_LEN, NamedGroup, Psk, SignatureScheme, TlsError,
+    handshake::HandshakeHeader,
     key_schedule::KeySchedule,
     record::{ContentType, RecordHeader},
 };
@@ -66,6 +66,7 @@ pub(crate) struct TlsStream {
     pub(crate) buf: std::collections::VecDeque<u8>,
     pub(crate) record_size_limit: u16,
     pub(crate) supported_named_groups: Vec<NamedGroup>,
+    pub(crate) supported_signature_algorithms: Vec<SignatureScheme>,
 }
 
 impl TlsStream {
