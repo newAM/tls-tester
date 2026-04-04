@@ -31,6 +31,7 @@ A tool for testing [TLS 1.3] implementation compliance.
     - `TLS_CHACHA20_POLY1305_SHA256`
 - Client ignores server `EncryptedExtensions`
 - Client ignores TLS certificate extensions
+- Client does not handle ServerHello retry requests
 - Certificate parsing is messy and contains many outstanding TODOs
 - PSK does not support `psk_ke`, only `psk_dhe_ke` is supported
 
