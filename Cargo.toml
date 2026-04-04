@@ -24,6 +24,12 @@ p384 = { version = "=0.14.0-rc.8", features = [
   "ecdsa-core",
   "ecdsa",
 ] }
+p521 = { version = "=0.14.0-rc.8", features = [
+  "ecdh",
+  "pem",
+  "ecdsa-core",
+  "ecdsa",
+] }
 pem = "3.0.6"
 rand = "0.10.0"
 rsa = { version = "=0.10.0-rc.17", features = ["sha2"] }

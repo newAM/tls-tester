@@ -57,7 +57,7 @@ pub fn vec8<'a>(
     let len: u8 = match buf.first() {
         Some(l) => *l,
         None => {
-            log::error!("{name} length is missing");
+            log::error!("{name} length byte is missing");
             return Err(AlertDescription::DecodeError);
         }
     };
@@ -97,7 +97,7 @@ pub fn vec16<'a>(
     let len: u16 = match buf.get(..2) {
         Some(l) => u16::from_be_bytes(l.try_into().unwrap()),
         None => {
-            log::error!("{name} length is missing");
+            log::error!("{name} length bytes are missing");
             return Err(AlertDescription::DecodeError);
         }
     };
@@ -140,7 +140,7 @@ pub fn vec24<'a>(
             u32::from_be_bytes(be_bytes)
         }
         None => {
-            log::error!("{name} length is missing");
+            log::error!("{name} length bytes are missing");
             return Err(AlertDescription::DecodeError);
         }
     };

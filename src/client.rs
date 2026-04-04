@@ -127,7 +127,7 @@ impl TlsClientBuilder {
             let parsed_cert = match crate::x509::Certificate::deser(cert.contents(), true) {
                 Some((_, c)) => c,
                 None => {
-                    log::error!("Failed to parse this shit");
+                    log::error!("Failed to parse x509 certificate");
                     continue;
                 }
             };

@@ -814,6 +814,7 @@ impl Validity {
 pub enum PublicKey {
     Prime256v1(p256::ecdsa::VerifyingKey),
     Secp384r1(p384::ecdsa::VerifyingKey),
+    Ansip521r1(p521::ecdsa::VerifyingKey),
     Rsa(rsa::RsaPublicKey),
 }
 
@@ -864,6 +865,27 @@ impl PublicKey {
 
                 if let Err(e) = result {
                     log::error!("Verification of certificate secp384r1 signature failed: {e:?}");
+                    false
+                } else {
+                    true
+                }
+            }
+            PublicKey::Ansip521r1(verifying_key) => {
+                let signature: p521::ecdsa::Signature =
+                    match p521::ecdsa::Signature::from_der(signature) {
+                        Ok(signature) => signature,
+                        Err(e) => {
+                            log::error!(
+                                "Certificate signature format does not match ansip521r1: {e:?}"
+                            );
+                            return Err(AlertDescription::BadCertificate)?;
+                        }
+                    };
+
+                let result = verifying_key.verify(to_verify, &signature);
+
+                if let Err(e) = result {
+                    log::error!("Verification of certificate ansip521r1 signature failed: {e:?}");
                     false
                 } else {
                     true
@@ -972,6 +994,18 @@ impl SubjectPublicKeyInfo {
                                 Err(e) => {
                                     log::error!(
                                         "Certificate.tbsCertificate.subjectPublicKeyInfo.subjectPublicKey is not a valid secp384r1 key in sec1 bytes: {e:?}"
+                                    );
+                                    return None;
+                                }
+                            }
+                        }
+                        // ansip521r1
+                        "1.3.132.0.35" => {
+                            match p521::ecdsa::VerifyingKey::from_sec1_bytes(pub_key_bytes) {
+                                Ok(key) => PublicKey::Ansip521r1(key),
+                                Err(e) => {
+                                    log::error!(
+                                        "Certificate.tbsCertificate.subjectPublicKeyInfo.subjectPublicKey is not a valid ansip521r1 key in sec1 bytes: {e:?}"
                                     );
                                     return None;
                                 }
