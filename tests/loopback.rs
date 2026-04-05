@@ -27,6 +27,7 @@ fn loopback_with(
     signature_algorithms: Vec<SignatureScheme>,
     named_groups: Vec<NamedGroup>,
     certs: ServerCertificates,
+    record_size_limit: u16,
 ) {
     stderrlog::new()
         .verbosity(4)
@@ -67,6 +68,7 @@ fn loopback_with(
         .ignore_unknown_ca(true)
         .set_supported_named_groups(named_groups)
         .set_supported_signature_algorithms(signature_algorithms)
+        .set_record_size_limit(record_size_limit)
         .handshake(tcp_stream)
         .expect("TLS handshake failed");
 
@@ -86,6 +88,7 @@ fn loopback_secp256r1() {
         vec![SignatureScheme::ecdsa_secp256r1_sha256],
         vec![NamedGroup::secp256r1],
         certs_ecdsa_secp256r1_sha256(),
+        u16::MAX,
     );
 }
 
@@ -95,6 +98,7 @@ fn loopback_x25519() {
         vec![SignatureScheme::ecdsa_secp256r1_sha256],
         vec![NamedGroup::x25519],
         certs_ecdsa_secp256r1_sha256(),
+        u16::MAX,
     );
 }
 
@@ -104,6 +108,17 @@ fn loopback_rsa_pss_rsae_sha256() {
         vec![SignatureScheme::rsa_pss_rsae_sha256],
         vec![NamedGroup::secp256r1, NamedGroup::x25519],
         certs_rsa_pss_rsae_sha256(),
+        u16::MAX,
+    );
+}
+
+#[test]
+fn loopback_min_record_size() {
+    loopback_with(
+        vec![SignatureScheme::ecdsa_secp256r1_sha256],
+        vec![NamedGroup::secp256r1, NamedGroup::x25519],
+        certs_ecdsa_secp256r1_sha256(),
+        1,
     );
 }
 
