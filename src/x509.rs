@@ -925,6 +925,52 @@ impl PublicKey {
             Err(AlertDescription::DecryptError)
         }
     }
+
+    pub(crate) fn verify_rsa_pkcs1v15<D>(
+        &self,
+        to_verify: &[u8],
+        signature: &[u8],
+    ) -> Result<(), AlertDescription>
+    where
+        D: Digest + AssociatedOid + sha2::digest::FixedOutputReset,
+    {
+        let is_ok: bool = match self {
+            PublicKey::Prime256v1(_) | PublicKey::Secp384r1(_) | PublicKey::Ansip521r1(_) => {
+                panic!("verify_rsa_pkcs1v15 called with EC key");
+            }
+            PublicKey::Rsa(public_key) => {
+                let signature: rsa::pkcs1v15::Signature = match rsa::pkcs1v15::Signature::try_from(
+                    signature,
+                ) {
+                    Ok(signature) => signature,
+                    Err(e) => {
+                        log::error!(
+                            "Certificate signature format does not match RSA PKCS #1 v1.5: {e:?}"
+                        );
+                        return Err(AlertDescription::BadCertificate)?;
+                    }
+                };
+
+                let verifying_key: rsa::pkcs1v15::VerifyingKey<D> =
+                    rsa::pkcs1v15::VerifyingKey::new(public_key.clone());
+
+                let result = verifying_key.verify(to_verify, &signature);
+
+                if let Err(e) = result {
+                    log::error!("Verification of certificate RSA signature failed: {e:?}");
+                    false
+                } else {
+                    true
+                }
+            }
+        };
+
+        if is_ok {
+            Ok(())
+        } else {
+            Err(AlertDescription::DecryptError)
+        }
+    }
 }
 
 /// # References
@@ -1025,7 +1071,7 @@ impl SubjectPublicKeyInfo {
                     return None;
                 }
             }
-            // rsaEncryption (PKCS #8)
+            // rsaEncryption (PKCS #1)
             "1.2.840.113549.1.1.1" => {
                 if algorithm.parameters.is_some() {
                     log::error!(
@@ -2051,15 +2097,15 @@ impl Certificate {
             }
             // sha256WithRSAEncryption (PKCS #1)
             "1.2.840.113549.1.1.11" => {
-                pk.verify::<sha2::Sha256>(tbs_certificate_bytes, signature_bytes)
+                pk.verify_rsa_pkcs1v15::<sha2::Sha256>(tbs_certificate_bytes, signature_bytes)
             }
             // sha384WithRSAEncryption (PKCS #1)
             "1.2.840.113549.1.1.12" => {
-                pk.verify::<sha2::Sha384>(tbs_certificate_bytes, signature_bytes)
+                pk.verify_rsa_pkcs1v15::<sha2::Sha384>(tbs_certificate_bytes, signature_bytes)
             }
             // sha512WithRSAEncryption (PKCS #1)
             "1.2.840.113549.1.1.13" => {
-                pk.verify::<sha2::Sha512>(tbs_certificate_bytes, signature_bytes)
+                pk.verify_rsa_pkcs1v15::<sha2::Sha512>(tbs_certificate_bytes, signature_bytes)
             }
             oid => {
                 log::error!(
