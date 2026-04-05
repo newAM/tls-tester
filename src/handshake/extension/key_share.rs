@@ -179,7 +179,45 @@ impl KeyShareClientHello {
 ///
 /// ```text
 /// struct {
+///     NamedGroup selected_group;
+/// } KeyShareHelloRetryRequest;
+///
+/// struct {
 ///     KeyShareEntry server_share;
 /// } KeyShareServerHello;
 /// ```
-pub type KeyShareServerHello = KeyShareEntry;
+#[derive(Debug)]
+pub(crate) enum KeyShareServerHello {
+    KeyShareServerHello(KeyShareEntry),
+    KeyShareHelloRetryRequest(NamedGroup),
+}
+
+impl KeyShareServerHello {
+    pub fn deser(b: &[u8], retry_request: bool) -> Result<(&[u8], Self), AlertDescription> {
+        if retry_request {
+            let (b, group) = parse::u16("KeyShareHelloRetryRequest.selected_group", b)?;
+
+            let named_group: NamedGroup = match NamedGroup::try_from(group) {
+                Ok(ng) => ng,
+                Err(val) => {
+                    // Upon receipt of this extension in a HelloRetryRequest, the client
+                    // MUST verify that (1) the selected_group field corresponds to a group
+                    // which was provided in the "supported_groups" extension in the
+                    // original ClientHello and (2) the selected_group field does not
+                    // correspond to a group which was provided in the "key_share" extension
+                    // in the original ClientHello.  If either of these checks fails, then
+                    // the client MUST abort the handshake with an "illegal_parameter"
+                    // alert.
+                    log::error!(
+                        "ServerHello.extensions.KeyShareHelloRetryRequest selected an unknown named group 0x{val:04x}"
+                    );
+                    return Err(AlertDescription::IllegalParameter);
+                }
+            };
+            Ok((b, Self::KeyShareHelloRetryRequest(named_group)))
+        } else {
+            let (b, kse) = KeyShareEntry::deser(b)?;
+            Ok((b, Self::KeyShareServerHello(kse)))
+        }
+    }
+}

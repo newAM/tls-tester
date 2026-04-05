@@ -173,8 +173,9 @@ impl ServerHello {
 
         let (b, random): (&[u8], [u8; 32]) = parse::fixed("ServerHello.random", b)?;
 
-        if random == SERVER_HELLO_RETRY_RANDOM {
-            unimplemented!("< ServerHello.random is a retry request");
+        let retry_request: bool = random == SERVER_HELLO_RETRY_RANDOM;
+        if retry_request {
+            log::debug!("< ServerHello.random is a retry request");
         }
 
         let (b, legacy_session_id_echo) =
@@ -208,7 +209,7 @@ impl ServerHello {
 
         let (_, exts) = parse::vec16("ServerHello.extensions", b, 6, 1)?;
 
-        let (_, exts) = ServerHelloExtensions::deser(exts)?;
+        let (_, exts) = ServerHelloExtensions::deser(exts, retry_request)?;
 
         Ok(Self {
             random,

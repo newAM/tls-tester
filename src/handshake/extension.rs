@@ -9,7 +9,7 @@ mod supported_versions;
 use std::collections::HashSet;
 
 pub use encrypted::EncryptedExtensions;
-pub use key_share::KeyShareServerHello;
+pub(crate) use key_share::KeyShareServerHello;
 pub(crate) use key_share::{KeyShareClientHello, KeyShareEntry};
 pub(crate) use psk::{
     OfferedPsks, PskIdentity, PskKeyExchangeMode, PskKeyExchangeModes, PskServerHello,
@@ -455,10 +455,10 @@ impl ClientHelloExtensions {
 /// ```
 #[derive(Debug)]
 pub enum ServerHelloExtension {
-    PreSharedKey(PskServerHello),             // RFC 8446
-    SupportedVersions(TlsVersion),            // RFC 8446
-    KeyShareServerHello(KeyShareServerHello), // RFC 8446
-    KeyShareHelloRetryRequest(NamedGroup),    // RFC 8446
+    PreSharedKey(PskServerHello),          // RFC 8446
+    SupportedVersions(TlsVersion),         // RFC 8446
+    KeyShareServerHello(KeyShareEntry),    // RFC 8446
+    KeyShareHelloRetryRequest(NamedGroup), // RFC 8446
 }
 
 impl ServerHelloExtension {
@@ -517,7 +517,7 @@ pub struct ServerHelloExtensions {
 }
 
 impl ServerHelloExtensions {
-    pub fn deser(mut b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
+    pub fn deser(mut b: &[u8], retry_request: bool) -> Result<(&[u8], Self), AlertDescription> {
         let mut extenstion_types: HashSet<Result<ExtensionType, u16>> = HashSet::new();
 
         let mut supported_versions: Option<u16> = None;
@@ -618,7 +618,7 @@ impl ServerHelloExtensions {
                     supported_versions.replace(data_u16);
                 }
                 Ok(ExtensionType::KeyShare) => {
-                    let (_, key_share_sh) = KeyShareServerHello::deser(data)?;
+                    let (_, key_share_sh) = KeyShareServerHello::deser(data, retry_request)?;
                     log::debug!("< ServerHello KeyShare {key_share_sh:?}");
                     key_share.replace(key_share_sh);
                 }

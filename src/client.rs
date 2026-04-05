@@ -182,7 +182,7 @@ pub struct TlsClientStream {
 }
 
 impl TlsClientStream {
-    pub(crate) fn read_server_hello(&mut self) -> Result<ServerHello, TlsError> {
+    pub(crate) fn read_server_hello(&mut self) -> Result<(Vec<u8>, ServerHello), TlsError> {
         let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
 
         if hs_hdr.msg_type() != HandshakeType::ServerHello {
@@ -198,10 +198,67 @@ impl TlsClientStream {
 
         let server_hello: ServerHello = ServerHello::deser(&data)?;
 
-        Ok(server_hello)
+        Ok((data, server_hello))
     }
 
-    fn handle_server_hello(&mut self, server_hello: &ServerHello) -> Result<Option<Psk>, TlsError> {
+    fn handle_server_hello(
+        &mut self,
+        hash_client_hello1: &[u8],
+        server_hello_data: &[u8],
+        server_hello: &mut ServerHello,
+    ) -> Result<Option<Psk>, TlsError> {
+        let key_share_entry: KeyShareEntry = match &server_hello.exts.key_share {
+            extension::KeyShareServerHello::KeyShareServerHello(key_share_entry) => {
+                key_share_entry.clone()
+            }
+            extension::KeyShareServerHello::KeyShareHelloRetryRequest(named_group) => {
+                // When the server responds to a ClientHello with a HelloRetryRequest,
+                // the value of ClientHello1 is replaced with a special synthetic handshake
+                // message of handshake type "message_hash" containing Hash(ClientHello1).
+                let mut new_transcript_hash: sha2::Sha256 = sha2::Sha256::new();
+                new_transcript_hash.update(HandshakeHeader::prepend_header(
+                    HandshakeType::MessageHash,
+                    hash_client_hello1,
+                ));
+                new_transcript_hash.update(HandshakeHeader::prepend_header(
+                    HandshakeType::ServerHello,
+                    server_hello_data,
+                ));
+                self.base
+                    .key_schedule
+                    .set_transcript_hash(new_transcript_hash);
+
+                let pub_key: KeyShareEntry =
+                    self.base.key_schedule.new_secret_key_client(*named_group);
+
+                let ch_build: ClientHelloBuilder = ClientHelloBuilder::new()
+                    .set_psks(self.base.psks.clone())
+                    .set_server_name(self.server_name.clone());
+                let data = ch_build.build(
+                    &self.base.supported_named_groups,
+                    &self.base.supported_signature_algorithms,
+                    pub_key,
+                    &mut self.base.key_schedule,
+                );
+                self.base
+                    .write_unencrypted_record(ContentType::Handshake, &data)?;
+
+                (_, *server_hello) = self.read_server_hello()?;
+
+                match &server_hello.exts.key_share {
+                    extension::KeyShareServerHello::KeyShareServerHello(key_share_entry) => {
+                        key_share_entry.clone()
+                    }
+                    extension::KeyShareServerHello::KeyShareHelloRetryRequest(ng) => {
+                        log::error!(
+                            "ServerHello is a second retry request with named group {ng:?}"
+                        );
+                        return Err(AlertDescription::HandshakeFailure)?;
+                    }
+                }
+            }
+        };
+
         if server_hello.cipher_suite != CipherSuite::TLS_AES_128_GCM_SHA256 {
             log::error!(
                 "ServerHello CipherSuite {:?} is not the expected CipherSuite TLS_AES_128_GCM_SHA256",
@@ -218,7 +275,7 @@ impl TlsClientStream {
             return Err(AlertDescription::ProtocolVersion)?;
         }
 
-        match server_hello.exts.key_share.named_group() {
+        match key_share_entry.named_group() {
             Ok(NamedGroup::secp256r1) | Ok(NamedGroup::x25519) => {}
             Ok(ng) => {
                 log::error!("ServerHello KeyShare named group {ng:?} is not supported");
@@ -246,9 +303,7 @@ impl TlsClientStream {
             None
         };
 
-        self.base
-            .key_schedule
-            .set_public_key(server_hello.exts.key_share.clone());
+        self.base.key_schedule.set_public_key(key_share_entry);
         self.base.key_schedule.initialize_handshake_secret();
 
         self.base.set_state(TlsState::WaitEncryptedExtensions);
@@ -519,20 +574,25 @@ impl TlsClientStream {
         let ch_build: ClientHelloBuilder = ClientHelloBuilder::new()
             .set_psks(self.base.psks.clone())
             .set_server_name(self.server_name.clone());
-        let data = ch_build.build(
+        let ch_data = ch_build.build(
             &self.base.supported_named_groups,
             &self.base.supported_signature_algorithms,
             pub_key,
             &mut self.base.key_schedule,
         );
         self.base
-            .write_unencrypted_record(ContentType::Handshake, &data)?;
+            .write_unencrypted_record(ContentType::Handshake, &ch_data)?;
+
+        let hash_client_hello1 = self.base.key_schedule.transcript_hash_bytes();
 
         self.base.key_schedule.random.replace(ch_build.random());
         self.base.key_schedule.initialize_early_secret();
 
-        let server_hello: ServerHello = self.read_server_hello()?;
-        let psk: Option<Psk> = self.handle_server_hello(&server_hello)?;
+        let psk: Option<Psk> = {
+            let (server_hello_data, mut server_hello): (Vec<u8>, ServerHello) =
+                self.read_server_hello()?;
+            self.handle_server_hello(&hash_client_hello1, &server_hello_data, &mut server_hello)?
+        };
 
         if !self.base.buf.is_empty() {
             log::error!("Server fragmented record across key changes");
