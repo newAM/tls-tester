@@ -1,20 +1,23 @@
 use std::{collections::VecDeque, fs, io, net::TcpStream};
 
 use crate::{
-    AlertDescription, Psk,
-    base::{TlsState, TlsStream},
+    AlertDescription, ECHConfigList, Psk,
+    base::{self, TlsState, TlsStream},
     cipher_suite::CipherSuite,
+    crypto::hpke::{AeadId, KdfId},
     error::TlsError,
     handshake::{
-        self, Certificate, CertificateEntry, CertificateVerify, ClientHelloBuilder,
+        self, Certificate, CertificateEntry, CertificateVerify, ClientHello, ClientHelloBuilder,
         HandshakeHeader, HandshakeType, KeyShareEntry, NamedGroup, ServerHello,
-        extension::{self, ServerName, signature_scheme::SignatureScheme},
+        ech::{ECHConfig, HpkeSymmetricCipherSuite},
+        extension::{self, EncryptedExtensions, ServerName, signature_scheme::SignatureScheme},
     },
     key_schedule::KeySchedule,
     parse,
     record::{self, ContentType},
     tls_version::TlsVersion,
 };
+use crypto_bigint::CtEq;
 use sha2::{
     Digest as _,
     digest::{array::Array, typenum::U32},
@@ -29,6 +32,7 @@ pub struct TlsClientBuilder {
     ignore_unknown_ca: bool,
     supported_named_groups: Vec<NamedGroup>,
     supported_signature_algorithms: Vec<SignatureScheme>,
+    ech: Option<ECHConfig>,
 }
 
 impl Default for TlsClientBuilder {
@@ -48,6 +52,7 @@ impl TlsClientBuilder {
             ignore_unknown_ca: false,
             supported_named_groups: NamedGroup::default_groups(),
             supported_signature_algorithms: SignatureScheme::default_signature_algorithms(),
+            ech: None,
         }
     }
 
@@ -59,6 +64,32 @@ impl TlsClientBuilder {
         );
         self.supported_named_groups = named_groups;
         self
+    }
+
+    #[must_use]
+    pub fn set_ech_config(mut self, config: ECHConfigList) -> Option<Self> {
+        const SUPPORTED_CIPHER_SUITE: HpkeSymmetricCipherSuite = HpkeSymmetricCipherSuite {
+            kdf_id: KdfId::HkdfSha256,
+            aead_id: AeadId::Aes128Gcm,
+        };
+
+        match config.list.iter().find(|p| {
+            p.contents
+                .key_config
+                .cipher_suites
+                .contains(&SUPPORTED_CIPHER_SUITE)
+        }) {
+            Some(config) => {
+                self.ech = Some(config.clone());
+                Some(self)
+            }
+            None => {
+                log::error!(
+                    "ECH configuration list does not contain a supported cipher suite, supported cipher suite: {SUPPORTED_CIPHER_SUITE:?}"
+                );
+                None
+            }
+        }
     }
 
     #[must_use]
@@ -166,6 +197,8 @@ impl TlsClientBuilder {
             server_name: self.server_name,
             trusted_roots: self.trusted_roots,
             ignore_unknown_ca: self.ignore_unknown_ca,
+            ech: self.ech,
+            inner_random: [0; 32],
         };
 
         ret.handshake()?;
@@ -179,10 +212,15 @@ pub struct TlsClientStream {
     pub(crate) server_name: Option<ServerName>,
     pub(crate) trusted_roots: Vec<crate::x509::Certificate>,
     ignore_unknown_ca: bool,
+    ech: Option<ECHConfig>,
+    inner_random: [u8; 32],
 }
 
 impl TlsClientStream {
-    pub(crate) fn read_server_hello(&mut self) -> Result<(Vec<u8>, ServerHello), TlsError> {
+    pub(crate) fn read_server_hello(
+        &mut self,
+        mut transcript_hash_ech: sha2::Sha256,
+    ) -> Result<(Vec<u8>, ServerHello, Vec<u8>), TlsError> {
         let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
 
         if hs_hdr.msg_type() != HandshakeType::ServerHello {
@@ -198,7 +236,18 @@ impl TlsClientStream {
 
         let server_hello: ServerHello = ServerHello::deser(&data)?;
 
-        Ok((data, server_hello))
+        // tls version: 2 bytes
+        // random: 32 bytes
+        const RANDOM_LAST_8_BYTES_IDX: usize = 2 + 32 - 8;
+
+        let mut data_transcript_hash_ech = data.clone();
+        data_transcript_hash_ech[RANDOM_LAST_8_BYTES_IDX..RANDOM_LAST_8_BYTES_IDX + 8].fill(0);
+
+        transcript_hash_ech.update(hs_hdr.to_be_bytes());
+        transcript_hash_ech.update(&data_transcript_hash_ech);
+        let transcript_ech_conf: Vec<u8> = transcript_hash_ech.finalize().to_vec();
+
+        Ok((data, server_hello, transcript_ech_conf))
     }
 
     fn handle_server_hello(
@@ -206,7 +255,26 @@ impl TlsClientStream {
         hash_client_hello1: &[u8],
         server_hello_data: &[u8],
         server_hello: &mut ServerHello,
+        transcript_ech_conf: Option<&[u8]>,
     ) -> Result<Option<Psk>, TlsError> {
+        // Check ECH acceptance if configured
+        if let (Some(_ech), Some(transcript)) = (&self.ech, transcript_ech_conf) {
+            let accept_confirmation: [u8; 8] =
+                base::compute_accept_confirmation(&self.inner_random, transcript);
+
+            let server_hello_random: [u8; 8] = server_hello.random[24..].try_into().unwrap();
+
+            if server_hello_random.ct_eq(&accept_confirmation).to_u8() == 1 {
+                log::info!("ECH accepted");
+            } else {
+                todo!(
+                    "ECH was rejected expected {:02x?} got {:02x?}",
+                    accept_confirmation,
+                    server_hello_random
+                );
+            }
+        }
+
         let key_share_entry: KeyShareEntry = match &server_hello.exts.key_share {
             extension::KeyShareServerHello::KeyShareServerHello(key_share_entry) => {
                 key_share_entry.clone()
@@ -234,7 +302,7 @@ impl TlsClientStream {
                 let ch_build: ClientHelloBuilder = ClientHelloBuilder::new()
                     .set_psks(self.base.psks.clone())
                     .set_server_name(self.server_name.clone());
-                let data = ch_build.build(
+                let (data, _inner_data) = ch_build.build(
                     &self.base.supported_named_groups,
                     &self.base.supported_signature_algorithms,
                     pub_key,
@@ -243,7 +311,8 @@ impl TlsClientStream {
                 self.base
                     .write_unencrypted_record(ContentType::Handshake, &data)?;
 
-                (_, *server_hello) = self.read_server_hello()?;
+                let transcript_hash_ech = sha2::Sha256::new();
+                let (_, server_hello, _) = self.read_server_hello(transcript_hash_ech)?;
 
                 match &server_hello.exts.key_share {
                     extension::KeyShareServerHello::KeyShareServerHello(key_share_entry) => {
@@ -325,11 +394,21 @@ impl TlsClientStream {
 
         let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
 
-        let (_, ee) = parse::vec16("EncryptedExtensions", &data, 0, 1)?;
+        let (remain, ee) = parse::vec16("EncryptedExtensions", &data, 0, 1)?;
 
-        if !ee.is_empty() {
-            log::error!("TODO: Client handling of server encrypted extensions unimplemented");
+        if !remain.is_empty() {
+            log::error!(
+                "EncryptedExtensions contains {} bytes of extra data",
+                remain.len()
+            );
+            return Err(AlertDescription::DecodeError)?;
         }
+
+        let encrypted_extensions: EncryptedExtensions = EncryptedExtensions::deser(ee)?;
+
+        log::error!(
+            "TODO: Client handling of server encrypted extensions unimplemented {encrypted_extensions:?}"
+        );
 
         Ok(())
     }
@@ -573,13 +652,18 @@ impl TlsClientStream {
 
         let ch_build: ClientHelloBuilder = ClientHelloBuilder::new()
             .set_psks(self.base.psks.clone())
+            .set_ech_config(self.ech.clone())
             .set_server_name(self.server_name.clone());
-        let ch_data = ch_build.build(
+
+        self.inner_random = ch_build.inner_random;
+
+        let (ch_data, inner_data): (Vec<u8>, Vec<u8>) = ch_build.build(
             &self.base.supported_named_groups,
             &self.base.supported_signature_algorithms,
             pub_key,
             &mut self.base.key_schedule,
         );
+
         self.base
             .write_unencrypted_record(ContentType::Handshake, &ch_data)?;
 
@@ -588,10 +672,40 @@ impl TlsClientStream {
         self.base.key_schedule.random.replace(ch_build.random());
         self.base.key_schedule.initialize_early_secret();
 
+        // Handle ECH transcript if configured
+        let mut transcript_hash_ech: sha2::Sha256 = sha2::Sha256::new();
+        if !inner_data.is_empty() {
+            // TODO: this is very hacky to deser my own thing
+            let client_hello_outer: ClientHello =
+                ClientHello::deser(&ch_data[4..], None).expect("TODO");
+            let client_hello_inner: ClientHello =
+                ClientHello::deser(&inner_data, Some(&client_hello_outer)).expect("TODO");
+
+            let transcript_hash_ech_data: Vec<u8> =
+                client_hello_outer.ech_transcript_data(&client_hello_inner);
+            transcript_hash_ech.update(&transcript_hash_ech_data);
+
+            self.base
+                .key_schedule
+                .set_transcript_hash(transcript_hash_ech.clone());
+        }
+
         let psk: Option<Psk> = {
-            let (server_hello_data, mut server_hello): (Vec<u8>, ServerHello) =
-                self.read_server_hello()?;
-            self.handle_server_hello(&hash_client_hello1, &server_hello_data, &mut server_hello)?
+            let (server_hello_data, mut server_hello, transcript_ech_conf): (
+                Vec<u8>,
+                ServerHello,
+                Vec<u8>,
+            ) = self.read_server_hello(transcript_hash_ech)?;
+            self.handle_server_hello(
+                &hash_client_hello1,
+                &server_hello_data,
+                &mut server_hello,
+                if !inner_data.is_empty() {
+                    Some(&transcript_ech_conf)
+                } else {
+                    None
+                },
+            )?
         };
 
         if !self.base.buf.is_empty() {

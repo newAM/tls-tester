@@ -36,8 +36,8 @@
       '';
 
       nativeCheckInputs = with pkgs; [
-        openssl
         curl
+        openssl
       ];
 
       meta = {

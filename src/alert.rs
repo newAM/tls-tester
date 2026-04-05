@@ -206,6 +206,8 @@ pub enum AlertDescription {
     ///
     /// [RFC 7301]: https://datatracker.ietf.org/doc/html/rfc7301
     NoApplicationProtocol = 120,
+    /// <https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#alerts>
+    EchRequired = 121,
 }
 
 impl From<AlertDescription> for u8 {
@@ -248,6 +250,7 @@ impl TryFrom<u8> for AlertDescription {
             x if x == (Self::UnknownPskIdentity as u8) => Ok(Self::UnknownPskIdentity),
             x if x == (Self::CertificateRequired as u8) => Ok(Self::CertificateRequired),
             x if x == (Self::NoApplicationProtocol as u8) => Ok(Self::NoApplicationProtocol),
+            x if x == (Self::EchRequired as u8) => Ok(Self::EchRequired),
             _ => Err(value),
         }
     }

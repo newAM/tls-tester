@@ -1,4 +1,4 @@
-mod encrypted;
+pub(crate) mod ech;
 mod key_share;
 mod psk;
 mod record_size_limit;
@@ -8,7 +8,6 @@ mod supported_versions;
 
 use std::collections::HashSet;
 
-pub use encrypted::EncryptedExtensions;
 pub(crate) use key_share::KeyShareServerHello;
 pub(crate) use key_share::{KeyShareClientHello, KeyShareEntry};
 pub(crate) use psk::{
@@ -21,7 +20,15 @@ pub use signature_scheme::SignatureScheme;
 use signature_scheme::deser_signature_scheme_list;
 pub use supported_versions::SupportedVersionsClientHello;
 
-use crate::{alert::AlertDescription, parse, tls_version::TlsVersion};
+use crate::{
+    alert::AlertDescription,
+    handshake::{
+        ClientHello,
+        ech::{ECHClientHello, OuterExtensions},
+    },
+    parse,
+    tls_version::TlsVersion,
+};
 
 use super::named_group::{NamedGroup, deser_named_group_list};
 
@@ -58,6 +65,8 @@ pub enum ExtensionType {
     PostHandshakeAuth = 49,                   // RFC 8446
     SignatureAlgorithmsCert = 50,             // RFC 8446
     KeyShare = 51,                            // RFC 8446
+    EncryptedClientHello = 0xfe0d,            // draft-ietf-tls-esni-25
+    EchOuterExtensions = 0xfd00,              // draft-ietf-tls-esni-25
 }
 
 impl ExtensionType {
@@ -71,6 +80,22 @@ impl ExtensionType {
 
     pub const fn to_be_bytes(self) -> [u8; 2] {
         (self as u16).to_be_bytes()
+    }
+
+    pub fn may_appear_in_ee(&self) -> bool {
+        // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
+        matches!(
+            self,
+            Self::ServerName
+                | Self::MaxFragmentLength
+                | Self::SupportedGroups
+                | Self::UseSrtp
+                | Self::Heartbeat
+                | Self::ApplicationLayerProtocolNegotiation
+                | Self::ClientCertificateType
+                | Self::ServerCertificateType
+                | Self::EarlyData
+        )
     }
 }
 
@@ -113,6 +138,8 @@ impl TryFrom<u16> for ExtensionType {
             x if x == (Self::PostHandshakeAuth as u16) => Ok(Self::PostHandshakeAuth),
             x if x == (Self::SignatureAlgorithmsCert as u16) => Ok(Self::SignatureAlgorithmsCert),
             x if x == (Self::KeyShare as u16) => Ok(Self::KeyShare),
+            x if x == (Self::EncryptedClientHello as u16) => Ok(Self::EncryptedClientHello),
+            x if x == (Self::EchOuterExtensions as u16) => Ok(Self::EchOuterExtensions),
             _ => Err(value),
         }
     }
@@ -136,6 +163,7 @@ impl TryFrom<u16> for ExtensionType {
 /// ```
 #[derive(Debug)]
 pub(crate) struct ClientHelloExtensions {
+    pub extension_data: Vec<(Result<ExtensionType, u16>, Vec<u8>)>,
     pub supported_versions: SupportedVersionsClientHello,
     // optional with psk_ke, but we only implement psk_dhe_ke
     pub key_share: KeyShareClientHello,
@@ -146,11 +174,16 @@ pub(crate) struct ClientHelloExtensions {
     pub pre_shared_key: Option<OfferedPsks>,
     pub psk_key_exchange_modes: Option<PskKeyExchangeModes>,
     pub record_size_limit: Option<RecordSizeLimit>,
+    pub encrypted_client_hello: Option<(ECHClientHello, usize, usize)>,
+    pub ech_outer_extensions: Option<OuterExtensions>,
 }
 
 impl ClientHelloExtensions {
-    pub fn deser(mut b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let mut extenstion_types: HashSet<Result<ExtensionType, u16>> = HashSet::new();
+    pub fn deser<'a>(
+        mut b: &'a [u8],
+        outer: Option<&ClientHello>,
+    ) -> Result<(&'a [u8], Self), AlertDescription> {
+        let mut extension_data: Vec<(Result<ExtensionType, u16>, Vec<u8>)> = Vec::new();
 
         let mut supported_versions: Option<SupportedVersionsClientHello> = None;
         let mut key_share: Option<KeyShareClientHello> = None;
@@ -160,12 +193,17 @@ impl ClientHelloExtensions {
         let mut pre_shared_key: Option<OfferedPsks> = None;
         let mut psk_key_exchange_modes: Option<PskKeyExchangeModes> = None;
         let mut record_size_limit: Option<RecordSizeLimit> = None;
+        let mut encrypted_client_hello: Option<(ECHClientHello, usize, usize)> = None;
         let mut signature_algorithms_cert: Option<Vec<SignatureScheme>> = None;
+        let mut ech_outer_extensions: Option<OuterExtensions> = None;
+
+        let initial_len: usize = b.len();
 
         while !b.is_empty() {
             let (new_b, extension_type): (_, u16) =
                 parse::u16("ClientHello extensions extension_type", b)?;
             b = new_b;
+            let extension_payload_idx = initial_len - b.len() + size_of::<u16>();
             let (new_b, data): (_, &[u8]) =
                 parse::vec16("ClientHello extensions extension_data", b, 0, 1)?;
             b = new_b;
@@ -174,21 +212,22 @@ impl ClientHelloExtensions {
 
             let extension_pretty: String = match extension_type {
                 Ok(et) => format!("{et:?}"),
-                Err(val) => format!("{val}"),
+                Err(val) => format!("0x{val:04x}"),
             };
 
             // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
             // There MUST NOT be more than one extension of the same type in a
             // given extension block.
-            let duplicate: bool = !extenstion_types.insert(extension_type);
+            let duplicate: bool = extension_data.iter().any(|(ty, _)| ty == &extension_type);
             if duplicate {
                 log::error!("< ClientHello Extension appeared more than once: {extension_pretty}");
                 return Err(AlertDescription::DecodeError)?;
             }
+            extension_data.push((extension_type, data.into()));
 
             match extension_type {
                 Ok(ExtensionType::ServerName) => {
-                    let server_name_list_deser = ServerNameList::deser(data)?;
+                    let server_name_list_deser: ServerNameList = ServerNameList::deser(data)?;
                     log::debug!("< ClientHello ServerName {:?}", server_name_list_deser);
                     server_name_list.replace(server_name_list_deser);
                 }
@@ -255,7 +294,7 @@ impl ClientHelloExtensions {
                         return Err(AlertDescription::UnexpectedMessage);
                     }
 
-                    let offered_psks = OfferedPsks::deser(data)?;
+                    let offered_psks: OfferedPsks = OfferedPsks::deser(data)?;
 
                     log::debug!("< ClientHello PreSharedKey {offered_psks:02X?}");
 
@@ -265,7 +304,8 @@ impl ClientHelloExtensions {
                     log::warn!("Ignoring ClientHello extension EarlyData");
                 }
                 Ok(ExtensionType::SupportedVersions) => {
-                    let supported_versions_deser = SupportedVersionsClientHello::deser(data)?;
+                    let supported_versions_deser: SupportedVersionsClientHello =
+                        SupportedVersionsClientHello::deser(data)?;
                     log::debug!("< ClientHello supported_versions {supported_versions_deser:04x?}");
                     supported_versions.replace(supported_versions_deser);
                 }
@@ -276,7 +316,8 @@ impl ClientHelloExtensions {
                     return Err(AlertDescription::UnsupportedExtension);
                 }
                 Ok(ExtensionType::PskKeyExchangeModes) => {
-                    let psk_key_exchange_modes_deser = PskKeyExchangeModes::deser(data)?;
+                    let psk_key_exchange_modes_deser: PskKeyExchangeModes =
+                        PskKeyExchangeModes::deser(data)?;
                     log::debug!(
                         "< ClientHello PskKeyExchangeModes {psk_key_exchange_modes_deser:?}"
                     );
@@ -298,9 +339,21 @@ impl ClientHelloExtensions {
                     signature_algorithms_cert.replace(signature_scheme_list);
                 }
                 Ok(ExtensionType::KeyShare) => {
-                    let key_share_ch = KeyShareClientHello::deser(data)?;
+                    let key_share_ch: KeyShareClientHello = KeyShareClientHello::deser(data)?;
                     log::debug!("< ClientHello KeyShare {key_share_ch:?}");
                     key_share.replace(key_share_ch);
+                }
+                Ok(ExtensionType::EncryptedClientHello) => {
+                    let ech_start_idx: usize = extension_payload_idx;
+                    let ech_end_idx: usize = ech_start_idx + data.len();
+                    let ech_client_hello: ECHClientHello = ECHClientHello::deser(data)?;
+                    log::debug!("< ClientHello EncryptedClientHello {ech_client_hello:02x?}");
+                    encrypted_client_hello.replace((ech_client_hello, ech_start_idx, ech_end_idx));
+                }
+                Ok(ExtensionType::EchOuterExtensions) => {
+                    let ech_outer_extensions_deser: OuterExtensions = OuterExtensions::deser(data)?;
+                    log::debug!("< ClientHello OuterExtensions {ech_outer_extensions_deser:02x?}");
+                    ech_outer_extensions.replace(ech_outer_extensions_deser);
                 }
                 Err(val) => {
                     // https://datatracker.ietf.org/doc/html/rfc8446#section-9.3
@@ -314,6 +367,51 @@ impl ClientHelloExtensions {
             }
         }
 
+        if let Some(outer) = outer
+            && let Some(outer_extensions) = &ech_outer_extensions
+        {
+            // TODO: all other extenions
+            // TODO: validate ordering (maybe replace my hashset dupe checker with a vec)
+            if outer_extensions
+                .types
+                .contains(&Ok(ExtensionType::SupportedVersions))
+                && supported_versions
+                    .replace(outer.exts.supported_versions.clone())
+                    .is_some()
+            {
+                todo!("handle duplicate supported versions")
+            }
+
+            if outer_extensions
+                .types
+                .contains(&Ok(ExtensionType::SignatureAlgorithms))
+            {
+                if signature_algorithms.is_some() {
+                    todo!("handle dupe sig algs")
+                }
+                signature_algorithms = outer.exts.signature_algorithms.clone();
+            }
+
+            if outer_extensions
+                .types
+                .contains(&Ok(ExtensionType::SupportedGroups))
+                && supported_groups
+                    .replace(outer.exts.supported_groups.clone())
+                    .is_some()
+            {
+                todo!("handle duplicate supported groups extension")
+            }
+
+            if outer_extensions
+                .types
+                .contains(&Ok(ExtensionType::KeyShare))
+                && key_share.replace(outer.exts.key_share.clone()).is_some()
+            {
+                todo!("handle duplicat key share extensio")
+            }
+        }
+
+        // TODO: why does this exist?
         if signature_algorithms_cert.is_none() {
             // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.3
             // If no "signature_algorithms_cert" extension is
@@ -424,7 +522,10 @@ impl ClientHelloExtensions {
             return Err(AlertDescription::MissingExtension);
         }
 
+        // TODO: if outer exists then check ECH extension exists and is value inner
+
         let exts: ClientHelloExtensions = ClientHelloExtensions {
+            extension_data,
             supported_versions,
             key_share,
             server_name_list,
@@ -434,6 +535,8 @@ impl ClientHelloExtensions {
             pre_shared_key,
             psk_key_exchange_modes,
             record_size_limit,
+            encrypted_client_hello,
+            ech_outer_extensions,
         };
 
         Ok((b, exts))
@@ -569,7 +672,9 @@ impl ServerHelloExtensions {
                     | ExtensionType::OidFilters
                     | ExtensionType::PostHandshakeAuth
                     | ExtensionType::SignatureAlgorithmsCert
-                    | ExtensionType::RecordSizeLimit,
+                    | ExtensionType::RecordSizeLimit
+                    | ExtensionType::EncryptedClientHello
+                    | ExtensionType::EchOuterExtensions,
                 ) => {
                     // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
                     // If an implementation receives an extension
@@ -651,6 +756,161 @@ impl ServerHelloExtensions {
         };
 
         Ok((b, exts))
+    }
+}
+
+/// Encrypted extensions.
+///
+/// # References
+///
+/// - [RFC 8446 Section 4.3.1](https://datatracker.ietf.org/doc/html/rfc8446#section-4.3.1)
+///
+/// ```text
+/// struct {
+///     Extension extensions<0..2^16-1>;
+/// } EncryptedExtensions;
+/// ```
+#[derive(Default, Debug)]
+pub(crate) struct EncryptedExtensions {
+    pub server_name_list: Option<ServerNameList>,
+    pub supported_groups: Option<Vec<NamedGroup>>,
+}
+
+impl EncryptedExtensions {
+    pub fn deser(mut b: &[u8]) -> Result<Self, AlertDescription> {
+        let mut extenstion_types: HashSet<Result<ExtensionType, u16>> = HashSet::new();
+
+        let mut server_name_list: Option<ServerNameList> = None;
+        let mut supported_groups: Option<Vec<NamedGroup>> = None;
+
+        while !b.is_empty() {
+            let (new_b, extension_type): (_, u16) =
+                parse::u16("EncryptedExtensions extension_type", b)?;
+            b = new_b;
+            let (new_b, data): (_, &[u8]) =
+                parse::vec16("EncryptedExtensions extension_data", b, 0, 1)?;
+            b = new_b;
+
+            let extension_type = ExtensionType::try_from(extension_type);
+
+            let extension_pretty: String = match extension_type {
+                Ok(et) => format!("{et:?}"),
+                Err(val) => format!("{val}"),
+            };
+
+            // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
+            // There MUST NOT be more than one extension of the same type in a
+            // given extension block.
+            let duplicate: bool = !extenstion_types.insert(extension_type);
+            if duplicate {
+                log::error!(
+                    "< EncryptedExtensions extension appeared more than once: {extension_pretty}"
+                );
+                return Err(AlertDescription::DecodeError)?;
+            }
+
+            if let Ok(et) = extension_type
+                && !et.may_appear_in_ee()
+            {
+                log::error!(
+                    "< EncryptedExtensions extension type {extension_pretty} is not allowed in EncryptedExtensions"
+                );
+                return Err(AlertDescription::IllegalParameter)?;
+            }
+
+            match extension_type {
+                Ok(ExtensionType::ServerName) => {
+                    let server_name_list_deser: ServerNameList = ServerNameList::deser(data)?;
+                    log::debug!(
+                        "< EncryptedExtensions ServerName {:?}",
+                        server_name_list_deser
+                    );
+                    server_name_list.replace(server_name_list_deser);
+                }
+                Ok(ExtensionType::MaxFragmentLength) => {
+                    log::warn!("Ignoring EncryptedExtensions extension MaxFragmentLength");
+                }
+                Ok(ExtensionType::StatusRequest) => unreachable!(),
+                Ok(ExtensionType::SupportedGroups) => {
+                    let supported_groups_deser: Vec<NamedGroup> = deser_named_group_list(data)?;
+                    log::debug!("< EncryptedExtensions SupportedGroups {supported_groups_deser:?}");
+                    supported_groups.replace(supported_groups_deser);
+                }
+                Ok(ExtensionType::SignatureAlgorithms) => unreachable!(),
+                Ok(ExtensionType::UseSrtp) => {
+                    log::warn!("Ignoring EncryptedExtensions extension UseSrtp");
+                }
+                Ok(ExtensionType::Heartbeat) => {
+                    log::warn!("Ignoring EncryptedExtensions extension Heartbeat");
+                }
+                Ok(ExtensionType::ApplicationLayerProtocolNegotiation) => {
+                    log::warn!(
+                        "Ignoring EncryptedExtensions extension ApplicationLayerProtocolNegotiation"
+                    );
+                }
+                Ok(ExtensionType::SignedCertificateTimestamp) => {
+                    log::warn!("Ignoring EncryptedExtensions extension SignedCertificateTimestamp");
+                }
+                Ok(ExtensionType::ClientCertificateType) => {
+                    log::warn!("Ignoring EncryptedExtensions extension ClientCertificateType");
+                }
+                Ok(ExtensionType::ServerCertificateType) => {
+                    log::warn!("Ignoring EncryptedExtensions extension ServerCertificateType");
+                }
+                Ok(ExtensionType::Padding) => unreachable!(),
+                Ok(ExtensionType::RecordSizeLimit) => unreachable!(),
+                Ok(ExtensionType::PreSharedKey) => unreachable!(),
+                Ok(ExtensionType::EarlyData) => {
+                    log::warn!("Ignoring ClientHello extension EarlyData");
+                }
+                Ok(ExtensionType::SupportedVersions) => unreachable!(),
+                Ok(ExtensionType::Cookie) => unreachable!(),
+                Ok(ExtensionType::PskKeyExchangeModes) => unreachable!(),
+                Ok(ExtensionType::CertificateAuthorities) => unreachable!(),
+                Ok(ExtensionType::OidFilters) => unreachable!(),
+                Ok(ExtensionType::PostHandshakeAuth) => unreachable!(),
+                Ok(ExtensionType::SignatureAlgorithmsCert) => unreachable!(),
+                Ok(ExtensionType::KeyShare) => unreachable!(),
+                Ok(ExtensionType::EncryptedClientHello) => unreachable!(),
+                Ok(ExtensionType::EchOuterExtensions) => unreachable!(),
+                Err(val) => {
+                    log::warn!("Ignoring unknown EncryptedExension extension 0x{val:04X}");
+                }
+            }
+        }
+
+        if !b.is_empty() {
+            log::error!(
+                "EncryptedExtensions contains {} bytes of extra data",
+                b.len()
+            );
+            return Err(AlertDescription::DecodeError);
+        }
+
+        let exts: EncryptedExtensions = EncryptedExtensions {
+            server_name_list,
+            supported_groups,
+        };
+
+        Ok(exts)
+    }
+
+    pub fn ser(&self) -> Vec<u8> {
+        let mut ret: Vec<u8> = vec![0; 2];
+
+        if let Some(server_name_list) = &self.server_name_list {
+            ret.extend_from_slice(&server_name_list.ser());
+        }
+
+        if self.supported_groups.is_some() {
+            todo!("Handle supported groups serialization");
+        }
+
+        let len: u16 = ret.len().strict_sub(2).try_into().expect("TODO");
+
+        ret[0..2].copy_from_slice(&len.to_be_bytes());
+
+        ret
     }
 }
 

@@ -9,6 +9,8 @@ repository = "https://github.com/newAM/tls-tester"
 
 [dependencies]
 aes-gcm = "=0.11.0-rc.3"
+crypto-bigint = "0.7.3"
+curve25519-dalek = "=5.0.0-pre.6"
 hkdf = "0.13.0"
 jiff = "0.2.23"
 log = "0.4.29"
@@ -34,10 +36,11 @@ pem = "3.0.6"
 rand = "0.10.0"
 rsa = { version = "=0.10.0-rc.17", features = ["sha2"] }
 sha2 = "0.11.0"
-x25519-dalek = { version = "=3.0.0-pre.6", features = [
-  "getrandom",
-  "reusable_secrets",
-] }
+zeroize = { version = "1.8.2", default-features = false }
 
 [dev-dependencies]
 stderrlog = "0.6"
+rustls = { version = "0.23.37", default-features = false, features = [
+  "std",
+  "aws_lc_rs",
+] }

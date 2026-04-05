@@ -1,7 +1,3 @@
-// vec8, pop u8 len from buf, pop &[u8] from buf, return remaining data
-// maybe accept a multiple argument for len validation, also a min then?
-// vec16
-
 use crate::alert::AlertDescription;
 
 pub fn u8<'a>(name: &str, buf: &'a [u8]) -> Result<(&'a [u8], u8), AlertDescription> {

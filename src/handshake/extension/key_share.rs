@@ -22,7 +22,7 @@ pub(crate) struct UnrecognizedKeyShareEntry {
 #[derive(Debug, Clone)]
 pub(crate) enum KeyShareEntry {
     Secp256r1(p256::PublicKey),
-    X25519(x25519_dalek::PublicKey),
+    X25519(crate::crypto::x25519::PublicKey),
     Unrecognized(UnrecognizedKeyShareEntry),
 }
 
@@ -67,8 +67,8 @@ impl KeyShareEntry {
     }
 
     pub fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let (b, group) = parse::u16("KeyShareEntry group", b)?;
-        let (b, key_exchange) = parse::vec16("KeyShareEntry key_exchange", b, 1, 1)?;
+        let (b, group) = parse::u16("KeyShareEntry.group", b)?;
+        let (b, key_exchange) = parse::vec16("KeyShareEntry.key_exchange", b, 1, 1)?;
 
         let named_group = NamedGroup::try_from(group);
 
@@ -106,7 +106,10 @@ impl KeyShareEntry {
                         return Err(AlertDescription::DecodeError)?;
                     }
                 };
-                Ok((b, Self::X25519(x25519_dalek::PublicKey::from(key_exact))))
+                Ok((
+                    b,
+                    Self::X25519(crate::crypto::x25519::PublicKey::from(key_exact)),
+                ))
             }
             Err(_) | Ok(_) => Ok((
                 b,
@@ -130,7 +133,7 @@ impl KeyShareEntry {
 ///     KeyShareEntry client_shares<0..2^16-1>;
 /// } KeyShareClientHello;
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct KeyShareClientHello {
     pub(crate) client_shares: Vec<KeyShareEntry>,
 }

@@ -14,6 +14,37 @@ use crate::{
     record::{ContentType, RecordHeader},
 };
 
+/// https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-7.2
+/// https://datatracker.ietf.org/doc/html/rfc8446#section-7.1
+/// https://datatracker.ietf.org/doc/html/rfc5869#section-2.3
+///
+/// ```text
+/// accept_confirmation = HKDF-Expand-Label(
+///     HKDF-Extract(0, ClientHelloInner.random),
+///     "ech accept confirmation",
+///     transcript_ech_conf,
+///     8)
+/// ```
+///
+/// ```text
+/// HKDF-Expand-Label(Secret, Label, Context, Length) =
+///     HKDF-Expand(Secret, HkdfLabel, Length)
+/// ```
+pub(crate) fn compute_accept_confirmation(
+    client_hello_inner_random: &[u8; 32],
+    transcript_ech_conf: &[u8],
+) -> [u8; 8] {
+    let label: Vec<u8> =
+        crate::key_schedule::hkdf_label(8, b"ech accept confirmation", transcript_ech_conf);
+
+    const SALT: Option<&[u8]> = None;
+    let secret: hkdf::Hkdf<sha2::Sha256> = hkdf::Hkdf::new(SALT, client_hello_inner_random);
+    let mut accept_confirmation: [u8; 8] = [0; 8];
+    secret.expand(&label, &mut accept_confirmation).unwrap();
+
+    accept_confirmation
+}
+
 /// Internal TLS states.
 // https://datatracker.ietf.org/doc/html/rfc8446#appendix-A.1
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]

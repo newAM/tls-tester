@@ -15,7 +15,7 @@ use crate::{alert::AlertDescription, parse, tls_version::TlsVersion};
 ///     };
 /// } SupportedVersions;
 /// ```
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct SupportedVersionsClientHello {
     versions: Vec<u16>,
 }

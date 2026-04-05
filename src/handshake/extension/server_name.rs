@@ -4,7 +4,7 @@ use crate::{alert::AlertDescription, parse};
 ///
 /// # References
 ///
-/// * [RFC 8446 Appendix B.3.1](https://datatracker.ietf.org/doc/html/rfc8446#appendix-B.3.1)
+/// - [RFC 6066 Section 3](https://datatracker.ietf.org/doc/html/rfc6066#section-3)
 ///
 /// ```text
 /// struct {
@@ -24,26 +24,33 @@ use crate::{alert::AlertDescription, parse};
 ///     ServerName server_name_list<1..2^16-1>
 /// } ServerNameList;
 /// ```
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct ServerNameList {
-    server_name_list: Vec<ServerName>,
+    pub server_name_list: Vec<ServerName>,
 }
 
 impl ServerNameList {
     pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (_, mut b) = parse::vec16("ServerNameList", b, 1, 1)?;
+        // TODO: tls-ech.dev has spec-violating zero-length server name lists with ECH
+        if b.is_empty() {
+            Ok(Self {
+                server_name_list: Vec::new(),
+            })
+        } else {
+            let (_, mut b) = parse::vec16("ServerNameList", b, 1, 1)?;
 
-        let mut ret: Vec<ServerName> = Vec::new();
+            let mut ret: Vec<ServerName> = Vec::new();
 
-        while !b.is_empty() {
-            let (b_new, name): (_, ServerName) = ServerName::deser(b)?;
-            b = b_new;
-            ret.push(name);
+            while !b.is_empty() {
+                let (b_new, name): (_, ServerName) = ServerName::deser(b)?;
+                b = b_new;
+                ret.push(name);
+            }
+
+            Ok(Self {
+                server_name_list: ret,
+            })
         }
-
-        Ok(ServerNameList {
-            server_name_list: ret,
-        })
     }
 
     pub fn ser(&self) -> Vec<u8> {
@@ -52,15 +59,23 @@ impl ServerNameList {
         let mut ret: Vec<u8> = vec![0; 2];
         for name in &self.server_name_list {
             let name_data: Vec<u8> = name.ser();
-            len = len.saturating_add(name_data.len().try_into().unwrap());
+            let name_len: u16 = name_data
+                .len()
+                .try_into()
+                .expect("ServerName length exceeds u16::MAX");
+            len = len
+                .checked_add(name_len)
+                .expect("ServerNameList total length exceeds u16::MAX");
             ret.extend_from_slice(&name_data);
         }
+
+        ret[..2].copy_from_slice(&len.to_be_bytes());
 
         ret
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ServerName {
     pub name: String,
 }
@@ -80,20 +95,20 @@ impl ServerName {
     }
 
     fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let (b, name_type): (_, u8) = parse::u8("ServerName name_type", b)?;
+        let (b, name_type): (_, u8) = parse::u8("ServerName.name_type", b)?;
 
         if name_type != 0 {
-            log::error!("ServerName name_type is not host_name");
+            log::error!("ServerName.name_type is not host_name");
             return Err(AlertDescription::IllegalParameter)?;
         }
 
-        let (remain, b): (_, &[u8]) = parse::vec16("ServerName host_name", b, 1, 1)?;
+        let (remain, b): (_, &[u8]) = parse::vec16("ServerName.host_name", b, 1, 1)?;
 
         let name: String = match String::from_utf8(b.to_vec()) {
             Ok(name) => name,
             Err(e) => {
                 // spec does not require host_name is UTF-8
-                log::error!("ServerName host_name is not UTF-8: {e}");
+                log::error!("ServerName.host_name is not UTF-8: {e}");
                 return Err(AlertDescription::DecodeError)?;
             }
         };
@@ -110,19 +125,45 @@ impl ServerName {
     }
 
     pub fn ser(&self) -> Vec<u8> {
-        let mut ret: Vec<u8> = Vec::with_capacity(self.name.len().saturating_add(5));
+        let mut ret: Vec<u8> = Vec::with_capacity(self.name.len().saturating_add(3));
 
-        // unwrap will never panic, length is validated in constructors
-        let name_list_len: [u8; 2] = u16::try_from(self.name.len().saturating_add(3))
-            .unwrap()
-            .to_be_bytes();
         let name_len: [u8; 2] = u16::try_from(self.name.len()).unwrap().to_be_bytes();
 
-        ret.extend_from_slice(&name_list_len);
         ret.push(0); // name_type host_name
         ret.extend_from_slice(&name_len);
         ret.extend(self.name.as_bytes());
 
         ret
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ServerName, ServerNameList};
+
+    const NAME: &str = "subdomain.example.com";
+
+    #[test]
+    fn server_name() {
+        let server_name: ServerName = ServerName::from_str(NAME).unwrap();
+
+        let server_name_bytes: Vec<u8> = server_name.ser();
+        let (remain, result) = ServerName::deser(&server_name_bytes).unwrap();
+
+        assert!(remain.is_empty());
+        assert_eq!(result, server_name);
+    }
+
+    #[test]
+    fn server_name_list() {
+        let server_name: ServerName = ServerName::from_str(NAME).unwrap();
+        let server_name_list: ServerNameList = ServerNameList {
+            server_name_list: vec![server_name],
+        };
+
+        let server_name_list_bytes: Vec<u8> = server_name_list.ser();
+        let result: ServerNameList = ServerNameList::deser(&server_name_list_bytes).unwrap();
+
+        assert_eq!(result, server_name_list);
     }
 }

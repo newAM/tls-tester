@@ -26,6 +26,12 @@ pub enum CipherSuite {
     TLS_AES_128_CCM_8_SHA256 = 0x1305,
 }
 
+impl CipherSuite {
+    pub(crate) fn to_be_bytes(self) -> [u8; 2] {
+        (self as u16).to_be_bytes()
+    }
+}
+
 impl From<CipherSuite> for u16 {
     #[inline]
     fn from(cipher_suite: CipherSuite) -> Self {

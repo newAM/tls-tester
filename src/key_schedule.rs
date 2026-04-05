@@ -51,12 +51,13 @@ const ZEROS_OF_SHA256_DIGEST_LEN: [u8; SHA256_DIGEST_LEN] = [0; SHA256_DIGEST_LE
 ///     opaque context<0..255> = Context;
 /// } HkdfLabel;
 /// ```
-fn hkdf_label(len: u16, label: &[u8], context: &[u8]) -> Vec<u8> {
+pub(crate) fn hkdf_label(len: u16, label: &[u8], context: &[u8]) -> Vec<u8> {
     let mut hkdf_label: Vec<u8> = Vec::new();
     hkdf_label.extend(&len.to_be_bytes());
 
     const LABEL_PREFIX: &[u8] = b"tls13 ";
-    let label_len: u8 = u8::try_from(label.len() + LABEL_PREFIX.len()).unwrap();
+    let label_len: u8 = u8::try_from(LABEL_PREFIX.len() + label.len()).unwrap();
+    debug_assert!(!label.is_empty());
 
     hkdf_label.push(label_len);
     hkdf_label.extend(LABEL_PREFIX);
@@ -133,7 +134,7 @@ pub enum KeyScheduleMain {
 
 pub enum SecretKey {
     Secp256r1(p256::ecdh::EphemeralSecret),
-    X25519(x25519_dalek::ReusableSecret),
+    X25519(crate::crypto::x25519::ReusableSecret),
 }
 
 pub struct KeySchedule {
@@ -231,8 +232,8 @@ impl KeySchedule {
         match named_group {
             NamedGroup::x25519 => {
                 let (private, public) = {
-                    let private_key = x25519_dalek::ReusableSecret::random();
-                    let public: x25519_dalek::PublicKey = (&private_key).into();
+                    let private_key = crate::crypto::x25519::ReusableSecret::random();
+                    let public: crate::crypto::x25519::PublicKey = (&private_key).into();
 
                     (private_key, public)
                 };
@@ -317,7 +318,7 @@ impl KeySchedule {
                     .unwrap()
             }
             SecretKey::X25519(ephemeral_secret) => {
-                let public_key: &x25519_dalek::PublicKey = match self
+                let public_key: &crate::crypto::x25519::PublicKey = match self
                     .public_key
                     .as_ref()
                     .expect("KeySchedule.public_key has not been initialized")
