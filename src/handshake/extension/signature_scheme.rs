@@ -1,4 +1,4 @@
-use crate::{alert::AlertDescription, parse};
+use crate::{alert::AlertDescription, decode::DecodeContext};
 
 /// # References
 ///
@@ -116,19 +116,19 @@ impl TryFrom<u16> for SignatureScheme {
 ///     SignatureScheme supported_signature_algorithms<2..2^16-2>;
 /// } SignatureSchemeList;
 /// ```
-pub(crate) fn deser_signature_scheme_list(
-    b: &[u8],
+pub(crate) fn decode_signature_scheme_list(
+    ctx: &mut DecodeContext,
 ) -> Result<Vec<SignatureScheme>, AlertDescription> {
-    let (_, vec_data) = parse::vec16(
-        "SignatureSchemeList supported_signature_algorithms",
-        b,
+    ctx.begin_vec16(
+        "supported_signature_algorithms",
+        "SignatureScheme<2..2^16-2>",
         2,
         2,
     )?;
-    let mut ret: Vec<SignatureScheme> = Vec::with_capacity(b.len() / 2);
 
-    for chunk in vec_data.chunks_exact(2) {
-        let signature_scheme: u16 = u16::from_be_bytes(chunk.try_into().unwrap());
+    let mut ret: Vec<SignatureScheme> = Vec::new();
+    while ctx.remaining() > 0 {
+        let signature_scheme: u16 = ctx.u16("signature_scheme", "SignatureScheme")?;
 
         match SignatureScheme::try_from(signature_scheme) {
             Ok(signature_scheme) => ret.push(signature_scheme),
@@ -137,6 +137,8 @@ pub(crate) fn deser_signature_scheme_list(
             }
         }
     }
+
+    ctx.end_vec()?;
 
     Ok(ret)
 }

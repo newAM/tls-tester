@@ -15,7 +15,7 @@ pub(crate) use finished::finished_with_hs_hdr;
 pub use named_group::NamedGroup;
 pub(crate) use server_hello::{ServerHello, ServerHelloBuilder};
 
-use crate::alert::AlertDescription;
+use crate::{alert::AlertDescription, decode::DecodeContext};
 
 /// Handshake Type.
 ///
@@ -135,6 +135,23 @@ impl HandshakeHeader {
             }
         };
         let length: u32 = u32::from_be_bytes(buf) & 0x00FF_FFFF;
+        Ok(Self { msg_type, length })
+    }
+
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let msg_type_byte = ctx.u8("msg_type", "HandshakeType")?;
+        let msg_type: HandshakeType = match msg_type_byte.try_into() {
+            Ok(msg_type) => msg_type,
+            Err(val) => {
+                log::error!("Client sent an invalid HandshakeType value: 0x{val:02X}");
+                return Err(AlertDescription::DecodeError);
+            }
+        };
+
+        let length_bytes: [u8; 3] = ctx.fixed("length", "uint24")?;
+        let length: u32 =
+            u32::from_be_bytes([0, length_bytes[0], length_bytes[1], length_bytes[2]]);
+
         Ok(Self { msg_type, length })
     }
 

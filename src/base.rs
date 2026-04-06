@@ -9,6 +9,7 @@ use sha2::digest::consts::U12;
 
 use crate::{
     Alert, AlertDescription, GCM_TAG_LEN, NamedGroup, Psk, SignatureScheme, TlsError,
+    decode::DecodeContext,
     handshake::HandshakeHeader,
     key_schedule::KeySchedule,
     record::{ContentType, RecordHeader},
@@ -94,7 +95,8 @@ pub(crate) struct TlsStream {
     pub(crate) state: TlsState,
     pub(crate) key_schedule: KeySchedule,
     pub(crate) psks: Vec<Psk>,
-    pub(crate) buf: std::collections::VecDeque<u8>,
+    pub(crate) buf: Vec<u8>,
+    pub(crate) buf_pos: usize,
     pub(crate) record_size_limit: u16,
     pub(crate) supported_named_groups: Vec<NamedGroup>,
     pub(crate) supported_signature_algorithms: Vec<SignatureScheme>,
@@ -116,12 +118,9 @@ impl TlsStream {
     }
 
     fn pop_front_fixed<const N: usize>(&mut self) -> Option<[u8; N]> {
-        if self.buf.len() >= N {
-            let mut buf: [u8; N] = [0; N];
-            for byte in buf.iter_mut() {
-                // unwrap will not occur, we checked length
-                *byte = self.buf.pop_front().unwrap()
-            }
+        if self.buf.len() - self.buf_pos >= N {
+            let buf: [u8; N] = self.buf[self.buf_pos..self.buf_pos + N].try_into().unwrap();
+            self.buf_pos += N;
             Some(buf)
         } else {
             None
@@ -129,13 +128,24 @@ impl TlsStream {
     }
 
     fn pop_front(&mut self, n: usize) -> Option<Vec<u8>> {
-        if self.buf.len() >= n {
-            let mut buf: Vec<u8> = Vec::with_capacity(n);
-            for _ in 0..n {
-                // unwrap will never occur due to initial length check
-                buf.push(self.buf.pop_front().unwrap())
-            }
+        if self.buf.len() - self.buf_pos >= n {
+            let buf: Vec<u8> = self.buf[self.buf_pos..self.buf_pos + n].to_vec();
+            self.buf_pos += n;
             Some(buf)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn buf_is_empty(&self) -> bool {
+        self.buf.len() == self.buf_pos
+    }
+
+    pub(crate) fn pop_front_byte(&mut self) -> Option<u8> {
+        if self.buf.len() > self.buf_pos {
+            let byte = self.buf[self.buf_pos];
+            self.buf_pos += 1;
+            Some(byte)
         } else {
             None
         }
@@ -173,6 +183,17 @@ impl TlsStream {
             };
             self.read_next_record()?;
         }
+    }
+
+    pub(crate) fn next_handshake(&mut self, name: &str) -> Result<DecodeContext, TlsError> {
+        let header = self.next_handshake_header()?;
+        let data = self.next_handshake_data(header)?;
+
+        let mut complete_buffer = Vec::with_capacity(HandshakeHeader::LEN + data.len());
+        complete_buffer.extend_from_slice(&header.to_be_bytes());
+        complete_buffer.extend_from_slice(&data);
+
+        Ok(DecodeContext::new(name, complete_buffer))
     }
 
     pub(crate) fn read_next_record(&mut self) -> Result<(), TlsError> {
@@ -235,7 +256,7 @@ impl TlsStream {
                 let orig_len: usize = self.buf.len();
                 self.buf.resize(orig_len + usize::from(rec_hdr.length()), 0);
 
-                let read_buf: &mut [u8] = &mut self.buf.make_contiguous()[orig_len..];
+                let read_buf: &mut [u8] = &mut self.buf[orig_len..];
                 self.stream.read_exact(read_buf)?;
 
                 self.key_schedule.increment_read_record_sequence_number();

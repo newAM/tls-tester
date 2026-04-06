@@ -1,4 +1,4 @@
-use crate::{alert::AlertDescription, parse};
+use crate::{alert::AlertDescription, decode::DecodeContext};
 
 /// Named groups.
 ///
@@ -89,13 +89,14 @@ impl TryFrom<u16> for NamedGroup {
 ///     NamedGroup named_group_list<2..2^16-1>;
 /// } NamedGroupList;
 /// ```
-pub(crate) fn deser_named_group_list(b: &[u8]) -> Result<Vec<NamedGroup>, AlertDescription> {
-    let (_, named_group_list): (_, &[u8]) =
-        parse::vec16("NamedGroupList named_group_list", b, 2, 2)?;
+pub(crate) fn decode_named_group_list(
+    ctx: &mut DecodeContext,
+) -> Result<Vec<NamedGroup>, AlertDescription> {
+    ctx.begin_vec16("named_group_list", "NamedGroup<2..2^16-1>", 2, 2)?;
 
-    let mut ret: Vec<NamedGroup> = Vec::with_capacity(named_group_list.len() / 2);
-    for chunk in named_group_list.chunks_exact(2) {
-        let group: u16 = u16::from_be_bytes(chunk.try_into().unwrap());
+    let mut ret: Vec<NamedGroup> = Vec::new();
+    while ctx.remaining() > 0 {
+        let group: u16 = ctx.u16("named_group", "NamedGroup")?;
 
         match NamedGroup::try_from(group) {
             Ok(n) => ret.push(n),
@@ -108,6 +109,8 @@ pub(crate) fn deser_named_group_list(b: &[u8]) -> Result<Vec<NamedGroup>, AlertD
             }
         }
     }
+
+    ctx.end_vec()?;
 
     Ok(ret)
 }

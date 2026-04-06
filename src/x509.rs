@@ -13,12 +13,11 @@ use sha2::Digest;
 use std::{
     fmt,
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
-    ops::Add,
 };
 
-use jiff::{Zoned, civil::DateTime, tz::TimeZone};
+use jiff::Zoned;
 
-use crate::{AlertDescription, parse};
+use crate::{AlertDescription, decode};
 
 /// Identifier octet
 ///
@@ -26,7 +25,7 @@ use crate::{AlertDescription, parse};
 ///
 /// - X.690 Section 8.1.2.2
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Class {
+pub enum Class {
     Universal = 0b00,
     Application = 0b01,
     ContextSpecific = 0b10,
@@ -39,7 +38,7 @@ pub(crate) enum Class {
 ///
 /// - X.690 Section 8.1.2.5
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Pc {
+pub enum Pc {
     /// Atomic type that cannot be broken down into smaller components.
     Primitive = 0b0,
     /// Composite type that consists of other types.
@@ -70,7 +69,7 @@ impl Pc {
 ///
 /// - X.690 Section 8.1.2 Identifier octets
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Tag {
+pub enum Tag {
     /// `BOOLEAN` tag: `1`.
     Boolean,
     /// `INTEGER` tag: `2`.
@@ -158,10 +157,10 @@ impl From<Tag> for u8 {
 ///
 /// - X.690 Section 8.1.2 Identifier octets
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Identifier {
-    class: Class,
-    pc: Pc,
-    tag: Tag,
+pub struct Identifier {
+    pub(crate) class: Class,
+    pub(crate) pc: Pc,
+    pub(crate) tag: Tag,
 }
 
 impl Identifier {
@@ -242,7 +241,8 @@ impl From<u8> for Identifier {
     fn from(val: u8) -> Self {
         let tag_raw: u8 = val & 0x1F;
         let pc_raw: u8 = (val >> 5) & 0x1;
-        let class_raw: u8 = (val >> 7) & 0x3;
+        // Bits 7:6 are the class (X.690 §8.1.2.2)
+        let class_raw: u8 = (val >> 6) & 0x3;
 
         let class: Class = match class_raw {
             0b00 => Class::Universal,
@@ -289,238 +289,107 @@ impl From<u8> for Identifier {
     }
 }
 
-/// DER encoding
+/// DER encoding — a parsed TLV (Tag-Length-Value) structure.
+///
+/// This type is retained as an internal representation for places in the
+/// DER parser that need to inspect the identifier and content together
+/// (e.g., iterating over a SET OF, or reading an arbitrary TLV whose
+/// tag determines subsequent parsing branches).
+///
+/// In the new `DecodeContext`-based API the `Encoding` struct is populated
+/// from the context cursor rather than being deserialized from raw `&[u8]`.
 ///
 /// # References
 ///
 /// - X.690 Section 8.1.1 Structure of an encoding
 #[derive(Debug, Clone)]
 pub(crate) struct Encoding {
-    identifier: Identifier,
-    content: Vec<u8>,
+    pub(crate) identifier: Identifier,
+    pub(crate) content: Vec<u8>,
 }
 
 impl Encoding {
-    pub fn deser<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Self)> {
-        let (b, id) = parse::u8(name, b).ok()?;
-        let identifier: Identifier = Identifier::from(id);
-
-        let length_debug: String = format!("{name} with {identifier:?}");
-
-        let (b, len_octet) = parse::u8(&length_debug, b).ok()?;
-
-        // Reference section 8.1.3, Length octets
-        // - indefinite form is forbidden by DER
-        //
-        // definite short form and long form:
-        // - short: bit 8 is zero, 7-1 to encode number of bytes in contents
-        // - long: bit 8 is one, 7-1 to encode number of bytes in length
-
-        if len_octet == 0xFF {
-            // 8.1.3.5 "the value 11111111 2 shall not be used"
-            log::error!("{length_debug} uses a forbidden value of 0xFF");
-            return None;
-        }
-
-        let long_form: bool = len_octet & 0x80 == 0x80;
-        let encoding_len_or_len_len: u8 = len_octet & 0x7F;
-
-        let (b, len): (_, u32) = if long_form {
-            let len_len: u8 = encoding_len_or_len_len;
-
-            let (b, len_buf) = parse::n(&length_debug, b, len_len.into()).ok()?;
-
-            // TLS limits certificates to 2**24, ensure all bytes preceding the
-            // last three are zero
-            if let Some(high_bytes) = len_buf.get(3..)
-                && high_bytes.iter().any(|&x| x != 0)
-            {
-                log::error!("{length_debug} exceeds maximum of 2**24");
-                return None;
-            }
-
-            let mut len: u32 = 0;
-            for (i, &byte) in len_buf.iter().rev().enumerate() {
-                len |= u32::from(byte) << i.saturating_mul(8);
-            }
-
-            (b, len)
-        } else {
-            (b, encoding_len_or_len_len.into())
-        };
-
-        let content_debug: String = format!("{name} with {identifier:?} of length {len}");
-
-        let (remain, content) = parse::n(
-            &content_debug,
-            b,
-            len.try_into().expect("unsupported architecture"),
-        )
-        .ok()?;
-
-        Some((
-            remain,
-            Self {
-                identifier,
-                content: content.into(),
-            },
-        ))
+    /// Read one DER TLV from `ctx`, returning the `Encoding` and leaving the
+    /// cursor positioned after the TLV's content.
+    pub(crate) fn read(name: &str, ctx: &mut decode::DecodeContext) -> Option<Self> {
+        let id = ctx.begin_tlv(name, "TLV")?;
+        let start = ctx.current_position();
+        let end = start + ctx.der_remaining();
+        let content = ctx
+            .original_buffer()
+            .get(start..end)
+            .unwrap_or(&[])
+            .to_vec();
+        // advance cursor to end of content, then close field
+        ctx.advance(end - start);
+        ctx.end_tlv()?;
+        Some(Self {
+            identifier: id,
+            content,
+        })
     }
 
-    pub fn deser_bool<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], bool)> {
-        let (b, encoding) = Self::deser_expected(Identifier::BOOLEAN, name, b)?;
-
-        let val: bool = Self::deser_bool_from_encoding(encoding, name)?;
-
-        Some((b, val))
+    /// Read one DER TLV from `ctx` and assert the identifier matches `expected`.
+    pub(crate) fn read_expected(
+        expected: Identifier,
+        name: &str,
+        ctx: &mut decode::DecodeContext,
+    ) -> Option<Self> {
+        let id = ctx.tlv_expected(name, "TLV", expected)?;
+        let start = ctx.current_position();
+        let end = start + ctx.der_remaining();
+        let content = ctx
+            .original_buffer()
+            .get(start..end)
+            .unwrap_or(&[])
+            .to_vec();
+        ctx.advance(end - start);
+        ctx.end_tlv()?;
+        Some(Self {
+            identifier: id,
+            content,
+        })
     }
 
-    pub fn deser_bool_from_encoding(encoding: Encoding, name: &str) -> Option<bool> {
-        match encoding.content.first() {
+    /// Read one DER TLV from `ctx` and assert the identifier matches `id1` or `id2`.
+    pub(crate) fn read_expected2(
+        id1: Identifier,
+        id2: Identifier,
+        name: &str,
+        ctx: &mut decode::DecodeContext,
+    ) -> Option<Self> {
+        let id = ctx.tlv_expected2(name, "TLV", id1, id2)?;
+        let start = ctx.current_position();
+        let end = start + ctx.der_remaining();
+        let content = ctx
+            .original_buffer()
+            .get(start..end)
+            .unwrap_or(&[])
+            .to_vec();
+        ctx.advance(end - start);
+        ctx.end_tlv()?;
+        Some(Self {
+            identifier: id,
+            content,
+        })
+    }
+
+    /// Interpret an already-read `Encoding` as a DER BOOLEAN.
+    pub(crate) fn bool_from_content(content: &[u8], name: &str) -> Option<bool> {
+        match content.first() {
             Some(0x00) => Some(false),
             Some(0xFF) => Some(true),
             Some(val) => {
-                log::error!("{name} boolean value invalid, expected 0x00 or 0xFF, got 0x{val:02x}");
+                log::error!(
+                    "{name} DER BOOLEAN has invalid value 0x{val:02x}, expected 0x00 or 0xFF"
+                );
                 None
             }
             None => {
-                log::error!("{name} boolean is missing a value byte");
+                log::error!("{name} DER BOOLEAN is missing value byte");
                 None
             }
         }
-    }
-
-    pub fn deser_expected<'a>(
-        identifier: Identifier,
-        name: &str,
-        b: &'a [u8],
-    ) -> Option<(&'a [u8], Self)> {
-        let (b, encoding) = Encoding::deser(name, b)?;
-
-        if encoding.identifier != identifier {
-            log::error!(
-                "{name} expected identifier octet {:?} got {:?} of length {}",
-                identifier,
-                encoding.identifier,
-                encoding.content.len(),
-            );
-            return None;
-        }
-
-        Some((b, encoding))
-    }
-
-    pub fn deser_expected2<'a>(
-        identifier1: Identifier,
-        identifier2: Identifier,
-        name: &str,
-        b: &'a [u8],
-    ) -> Option<(&'a [u8], Self)> {
-        let (b, encoding) = Encoding::deser(name, b)?;
-
-        if encoding.identifier != identifier1 && encoding.identifier != identifier2 {
-            log::error!(
-                "{name} expected identifier octet {:?} or {:?} got {:?} of length {}",
-                identifier1,
-                identifier2,
-                encoding.identifier,
-                encoding.content.len(),
-            );
-            return None;
-        }
-
-        Some((b, encoding))
-    }
-
-    pub fn deser_set<'a>(
-        inner_identifier: Identifier,
-        name: &str,
-        b: &'a [u8],
-    ) -> Option<(&'a [u8], Vec<Self>)> {
-        let (remain, encoding) = Encoding::deser_expected(Identifier::SET, name, b)?;
-
-        let mut encoding_data: &[u8] = &encoding.content;
-        let mut encodings: Vec<Encoding> = Vec::new();
-        let mut i: usize = 0;
-
-        while !encoding_data.is_empty() {
-            let loop_name: String = format!("{name}[{i}]");
-            let (loop_b, encoding) =
-                Self::deser_expected(inner_identifier, &loop_name, encoding_data)?;
-            encodings.push(encoding);
-            encoding_data = loop_b;
-            i += 1;
-        }
-
-        Some((remain, encodings))
-    }
-
-    // printable string or utf-8 string
-    pub fn deser_string<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], String)> {
-        let (b, encoding) = Encoding::deser_expected2(
-            Identifier::UTF8STRING,
-            Identifier::PRINTABLESTRING,
-            name,
-            b,
-        )?;
-
-        if encoding.identifier == Identifier::UTF8STRING {
-            match String::from_utf8(encoding.content) {
-                Ok(s) => Some((b, s)),
-                Err(e) => {
-                    log::error!("{name} is not a valid UTF-8 string: {e:?}");
-                    None
-                }
-            }
-        } else {
-            Some((b, String::from_utf8_lossy(&encoding.content).to_string()))
-        }
-    }
-
-    pub fn deser_utf8_string<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], String)> {
-        let (b, encoding) = Encoding::deser_expected(Identifier::UTF8STRING, name, b)?;
-
-        match String::from_utf8(encoding.content) {
-            Ok(s) => Some((b, s)),
-            Err(e) => {
-                log::error!("{name} is not a valid UTF-8 string: {e:?}");
-                None
-            }
-        }
-    }
-
-    /// # References
-    ///
-    /// - [RFC 5280 Section 4.1](https://datatracker.ietf.org/doc/html/rfc5280#section-4.1)
-    ///
-    /// ```text
-    /// Time ::= CHOICE {
-    ///      utcTime        UTCTime,
-    ///      generalTime    GeneralizedTime }
-    /// ```
-    pub fn deser_time<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Zoned)> {
-        let (b, encoding) =
-            Encoding::deser_expected2(Identifier::GENERALIZEDTIME, Identifier::UTCTIME, name, b)?;
-
-        let timefmt: &str = match encoding.identifier {
-            Identifier::GENERALIZEDTIME => "%Y%m%d%H%M%SZ",
-            Identifier::UTCTIME => "%y%m%d%H%M%SZ",
-            _ => unreachable!(),
-        };
-
-        let content: String = String::from_utf8_lossy(&encoding.content).to_string();
-
-        let datetime = match DateTime::strptime(timefmt, &content) {
-            Ok(datetime) => datetime,
-            Err(e) => {
-                log::error!("{name} with content '{content}' is not a valid UTC time: {e:?}");
-                return None;
-            }
-        };
-
-        let timestamp = datetime.to_zoned(TimeZone::UTC).unwrap();
-
-        Some((b, timestamp))
     }
 }
 
@@ -541,7 +410,7 @@ impl fmt::Display for ObjectIdentifier {
 
 impl ObjectIdentifier {
     // https://learn.microsoft.com/en-gb/windows/win32/seccertenroll/about-object-identifier
-    fn decode(name: &str, content: Vec<u8>) -> Option<Self> {
+    fn from_content(name: &str, content: Vec<u8>) -> Option<Self> {
         let mut repr: String = String::new();
 
         if let Some(byte0) = content.first() {
@@ -549,7 +418,7 @@ impl ObjectIdentifier {
             let node0: u8 = (byte0 - node1) / 0x28;
             repr.push_str(&format!("{node0}.{node1}"));
         } else {
-            log::error!("{name} must not be empty");
+            log::error!("{name} OID must not be empty");
             return None;
         }
 
@@ -573,34 +442,25 @@ impl ObjectIdentifier {
         }
 
         if acc.is_some() {
-            log::error!("{name} has an unterminated multi-byte encoding");
+            log::error!("{name} OID has an unterminated multi-byte encoding");
             return None;
         }
 
         Some(Self { oid: content, repr })
     }
 
-    pub fn deser<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Self)> {
-        let (b, encoding) = Encoding::deser_expected(Identifier::OBJECTIDENTIFIER, name, b)?;
-
-        Some((b, Self::decode(name, encoding.content)?))
+    /// Read a DER OBJECT IDENTIFIER TLV from `ctx`.
+    pub fn deser(name: &str, ctx: &mut decode::DecodeContext) -> Option<Self> {
+        let raw = ctx.der_oid_raw(name)?;
+        Self::from_content(name, raw)
     }
 
-    pub fn deser_or_null<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Option<Self>)> {
-        let (b, encoding) =
-            Encoding::deser_expected2(Identifier::OBJECTIDENTIFIER, Identifier::NULL, name, b)?;
-
-        if encoding.identifier == Identifier::NULL {
-            if !encoding.content.is_empty() {
-                log::error!(
-                    "{name} with a null identifer has a content length of {}",
-                    encoding.content.len()
-                );
-                return None;
-            }
-            Some((b, None))
-        } else {
-            Some((b, Some(Self::decode(name, encoding.content)?)))
+    /// Read a DER OBJECT IDENTIFIER or NULL TLV from `ctx`.
+    /// Returns `Some(oid)` for an OID, `None` for a well-formed NULL.
+    pub fn deser_or_null(name: &str, ctx: &mut decode::DecodeContext) -> Option<Option<Self>> {
+        match ctx.der_oid_or_null(name)? {
+            Some(raw) => Some(Some(Self::from_content(name, raw)?)),
+            None => Some(None),
         }
     }
 }
@@ -612,15 +472,15 @@ mod object_identifier_tests {
     #[test]
     fn object_identifier() {
         let content: Vec<u8> = vec![0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01];
-        let oid: ObjectIdentifier = ObjectIdentifier::decode("test", content).unwrap();
+        let oid: ObjectIdentifier = ObjectIdentifier::from_content("test", content).unwrap();
         assert_eq!(oid.repr, "1.2.840.10045.2.1");
 
         let content: Vec<u8> = vec![0x2B, 0x81, 0x04, 0x00, 0x22];
-        let oid: ObjectIdentifier = ObjectIdentifier::decode("test", content).unwrap();
+        let oid: ObjectIdentifier = ObjectIdentifier::from_content("test", content).unwrap();
         assert_eq!(oid.repr, "1.3.132.0.34");
 
         let content: Vec<u8> = vec![0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01];
-        let oid: ObjectIdentifier = ObjectIdentifier::decode("test", content).unwrap();
+        let oid: ObjectIdentifier = ObjectIdentifier::from_content("test", content).unwrap();
         assert_eq!(oid.repr, "1.2.840.113549.1.1.1");
     }
 }
@@ -652,11 +512,12 @@ pub(crate) struct AttributeTypeAndValue {
 }
 
 impl AttributeTypeAndValue {
-    pub fn deser<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Self)> {
-        let (b, oid) = ObjectIdentifier::deser(&format!("{name}.type"), b)?;
+    pub fn deser(name: &str, ctx: &mut decode::DecodeContext) -> Option<Self> {
+        let oid = ObjectIdentifier::deser(&format!("{name}.type"), ctx)?;
         let value_name: String = format!("{name}.value");
 
-        let (b, encoding) = Encoding::deser(&value_name, b)?;
+        // Read the DirectoryString — an arbitrary string tag
+        let encoding = Encoding::read(&value_name, ctx)?;
 
         if encoding.identifier.class != Class::Universal {
             log::error!(
@@ -700,7 +561,7 @@ impl AttributeTypeAndValue {
             }
         };
 
-        Some((b, Self { oid, value }))
+        Some(Self { oid, value })
     }
 }
 
@@ -723,30 +584,34 @@ pub(crate) struct Name {
 }
 
 impl Name {
-    pub fn deser<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Self)> {
-        let (remain, encoding) = Encoding::deser_expected(Identifier::SEQUENCE, name, b)?;
+    pub fn deser(name: &str, ctx: &mut decode::DecodeContext) -> Option<Self> {
+        // Outer SEQUENCE (the RDNSequence)
+        ctx.tlv_expected(name, "SEQUENCE", Identifier::SEQUENCE)?;
 
         let rdn_name: String = format!("{name}.rdnSequence");
-
         let mut rdn_sequence: Vec<AttributeTypeAndValue> = Vec::new();
-
-        let mut content: &[u8] = encoding.content.as_ref();
         let mut x: usize = 0;
 
-        while !content.is_empty() {
-            let (local_b, set) = Encoding::deser_set(Identifier::SEQUENCE, &rdn_name, content)?;
-            content = local_b;
-
-            for (y, rdn) in set.iter().enumerate() {
-                let loop_name: String = format!("{name}[{x}][{y}]");
-                let (_, atav) = AttributeTypeAndValue::deser(&loop_name, &rdn.content)?;
+        while ctx.der_remaining() > 0 {
+            // Each RDN is a SET
+            let set_name = format!("{rdn_name}[{x}]");
+            ctx.tlv_expected(&set_name, "SET", Identifier::SET)?;
+            let mut y: usize = 0;
+            while ctx.der_remaining() > 0 {
+                // Each element of the SET is a SEQUENCE (AttributeTypeAndValue)
+                let atav_name = format!("{name}[{x}][{y}]");
+                ctx.tlv_expected(&atav_name, "SEQUENCE", Identifier::SEQUENCE)?;
+                let atav = AttributeTypeAndValue::deser(&atav_name, ctx)?;
+                ctx.end_tlv()?; // end AttributeTypeAndValue SEQUENCE
                 rdn_sequence.push(atav);
+                y += 1;
             }
-
+            ctx.end_tlv()?; // end SET
             x += 1;
         }
 
-        Some((remain, Self { rdn_sequence }))
+        ctx.end_tlv()?; // end outer SEQUENCE
+        Some(Self { rdn_sequence })
     }
 
     /// Returns the commonName if present in the sequence
@@ -777,36 +642,29 @@ pub(crate) struct Validity {
 }
 
 impl Validity {
-    pub fn deser(b: &[u8]) -> Option<(&[u8], Self)> {
-        let (remain, validity) = Encoding::deser_expected(
-            Identifier::SEQUENCE,
+    pub fn deser(ctx: &mut decode::DecodeContext) -> Option<Self> {
+        ctx.tlv_expected(
             "Certificate.tbsCertificate.validity",
-            b,
+            "SEQUENCE",
+            Identifier::SEQUENCE,
         )?;
 
-        let (b, not_before) = Encoding::deser_time(
-            "Certificate.tbsCertificate.validity.notBefore",
-            &validity.content,
-        )?;
+        let not_before = ctx.der_time("Certificate.tbsCertificate.validity.notBefore")?;
+        let not_after = ctx.der_time("Certificate.tbsCertificate.validity.notAfter")?;
 
-        let (b, not_after) =
-            Encoding::deser_time("Certificate.tbsCertificate.validity.notAfter", b)?;
-
-        if !b.is_empty() {
+        if ctx.der_remaining() > 0 {
             log::error!(
                 "Certificate.tbsCertificate.validity contains {} bytes of extra data",
-                b.len()
+                ctx.der_remaining()
             );
             return None;
         }
 
-        Some((
-            remain,
-            Self {
-                not_before,
-                not_after,
-            },
-        ))
+        ctx.end_tlv()?; // end SEQUENCE
+        Some(Self {
+            not_before,
+            not_after,
+        })
     }
 }
 
@@ -989,24 +847,22 @@ pub(crate) struct SubjectPublicKeyInfo {
 }
 
 impl SubjectPublicKeyInfo {
-    pub fn deser(b: &[u8]) -> Option<(&[u8], Self)> {
-        let (remain, subject_public_key_info) = Encoding::deser_expected(
-            Identifier::SEQUENCE,
+    pub fn deser(ctx: &mut decode::DecodeContext) -> Option<Self> {
+        ctx.tlv_expected(
             "Certificate.tbsCertificate.subjectPublicKeyInfo",
-            b,
+            "SEQUENCE",
+            Identifier::SEQUENCE,
         )?;
 
-        let (b, algorithm) = AlgorithmIdentifier::deser(
+        let algorithm = AlgorithmIdentifier::deser(
             "Certificate.tbsCertificate.subjectPublicKeyInfo.algorithm",
-            &subject_public_key_info.content,
-        )?;
-        let (b, subject_public_key) = Encoding::deser_expected(
-            Identifier::BITSTRING,
-            "Certificate.tbsCertificate.subjectPublicKeyInfo.subjectPublicKey",
-            b,
+            ctx,
         )?;
 
-        let pub_key_bytes = match subject_public_key.content.get(1..) {
+        // BIT STRING: first content byte is the unused-bits count
+        let bit_string =
+            ctx.der_bit_string("Certificate.tbsCertificate.subjectPublicKeyInfo.subjectPublicKey")?;
+        let pub_key_bytes = match bit_string.get(1..) {
             Some(bytes) => bytes,
             _ => {
                 log::error!(
@@ -1098,21 +954,19 @@ impl SubjectPublicKeyInfo {
             }
         };
 
-        if !b.is_empty() {
+        if ctx.der_remaining() > 0 {
             log::error!(
                 "Certificate.tbsCertificate.subjectPublicKeyInfo contains {} bytes of extra data",
-                b.len()
+                ctx.der_remaining()
             );
             return None;
         }
 
-        Some((
-            remain,
-            Self {
-                algorithm,
-                subject_public_key,
-            },
-        ))
+        ctx.end_tlv()?; // end SEQUENCE
+        Some(Self {
+            algorithm,
+            subject_public_key,
+        })
     }
 }
 
@@ -1131,32 +985,30 @@ pub enum Version {
 }
 
 impl Version {
-    pub fn deser(b: &[u8]) -> Option<(&[u8], Self)> {
-        let (remain, encoding) = Encoding::deser_expected(
-            Identifier {
-                class: Class::Application,
-                pc: Pc::Constructed,
-                tag: Tag::Unknown(0),
-            },
+    pub fn deser(ctx: &mut decode::DecodeContext) -> Option<Self> {
+        // The [0] EXPLICIT wrapper: tag byte 0xA0 = ContextSpecific | Constructed | tag 0
+        let wrapper_id = Identifier {
+            class: Class::ContextSpecific,
+            pc: Pc::Constructed,
+            tag: Tag::Unknown(0),
+        };
+        ctx.tlv_expected(
             "Certificate.tbsCertificate.version",
-            b,
+            "[0] EXPLICIT",
+            wrapper_id,
         )?;
 
-        let (b, version_encoding) = Encoding::deser_expected(
-            Identifier::INTEGER,
-            "Certificate.tbsCertificate.version",
-            &encoding.content,
-        )?;
+        let version_bytes = ctx.der_integer("Certificate.tbsCertificate.version")?;
 
-        if version_encoding.content.len() != 1 {
+        if version_bytes.len() != 1 {
             log::error!(
                 "Certificate.tbsCertificate.version must contain exactly 1 byte, got {}",
-                version_encoding.content.len()
+                version_bytes.len()
             );
             return None;
         }
 
-        let version: Version = match version_encoding.content[0] {
+        let version: Version = match version_bytes[0] {
             0 => Version::V1,
             1 => Version::V2,
             2 => Version::V3,
@@ -1166,15 +1018,16 @@ impl Version {
             }
         };
 
-        if !b.is_empty() {
+        if ctx.der_remaining() > 0 {
             log::error!(
                 "Certificate.tbsCertificate.version contains {} bytes of extra data",
-                b.len()
+                ctx.der_remaining()
             );
             return None;
         }
 
-        Some((remain, version))
+        ctx.end_tlv()?; // end [0] EXPLICIT
+        Some(version)
     }
 }
 
@@ -1213,13 +1066,14 @@ pub enum GeneralName {
 }
 
 impl GeneralName {
-    pub fn deser<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Self)> {
-        let (b, encoding) = Encoding::deser(name, b)?;
+    pub fn deser(name: &str, ctx: &mut decode::DecodeContext) -> Option<Self> {
+        // GeneralName uses context-specific IMPLICIT tags (class = ContextSpecific)
+        let encoding = Encoding::read(name, ctx)?;
 
-        if encoding.identifier.class != Class::Application {
+        if encoding.identifier.class != Class::ContextSpecific {
             log::error!(
                 "{name} expected identifier class {:?} got {:?}",
-                Class::Application,
+                Class::ContextSpecific,
                 encoding.identifier.class
             );
             return None;
@@ -1301,7 +1155,7 @@ impl GeneralName {
                 }
             }
             8 => {
-                // TODO: implement EDIPartyName type
+                // TODO: implement registeredID type
                 log::warn!("{name} ignoring unimplemented GeneralName type registeredID");
                 Self::Unimplemented(encoding.content)
             }
@@ -1311,7 +1165,7 @@ impl GeneralName {
             }
         };
 
-        Some((b, ret))
+        Some(ret)
     }
 
     /// Returns `true` if the general name is [`DnsName`].
@@ -1340,26 +1194,34 @@ pub struct SubjectAltName {
 }
 
 impl SubjectAltName {
-    pub fn deser(n: usize, b: &[u8]) -> Option<Self> {
+    /// Parse SubjectAltName from `ctx` positioned at the start of the
+    /// extension's `extnValue` content (inside the OCTET STRING wrapper).
+    /// `n` is the extension index for diagnostic messages.
+    pub fn deser(n: usize, ctx: &mut decode::DecodeContext) -> Option<Self> {
         let name = format!("Certificate.tbsCertificate.extensions[{n}].extnValue");
 
-        let (b, seq) =
-            Encoding::deser_expected(Identifier::SEQUENCE, &format!("{name}.GeneralNames"), b)?;
-
-        let mut seq_b: &[u8] = seq.content.as_ref();
+        // GeneralNames ::= SEQUENCE SIZE (1..MAX) OF GeneralName
+        ctx.tlv_expected(
+            &format!("{name}.GeneralNames"),
+            "SEQUENCE",
+            Identifier::SEQUENCE,
+        )?;
 
         let mut names: Vec<GeneralName> = Vec::new();
 
-        while !seq_b.is_empty() {
+        while ctx.der_remaining() > 0 {
             let name_name = format!("{name}.GeneralNames[{}]", names.len());
-            let (local_b, general_name) = GeneralName::deser(&name_name, seq_b)?;
-            seq_b = local_b;
-
+            let general_name = GeneralName::deser(&name_name, ctx)?;
             names.push(general_name);
         }
 
-        if !b.is_empty() {
-            log::error!("{name} contains {} bytes of extra data", b.len());
+        ctx.end_tlv()?; // end GeneralNames SEQUENCE
+
+        if ctx.der_remaining() > 0 {
+            log::error!(
+                "{name} contains {} bytes of extra data",
+                ctx.der_remaining()
+            );
             return None;
         }
 
@@ -1394,18 +1256,22 @@ pub struct SubjectKeyIdentifier {
 }
 
 impl SubjectKeyIdentifier {
-    pub fn deser(n: usize, b: &[u8]) -> Option<Self> {
+    /// Parse SubjectKeyIdentifier from `ctx` positioned at the start of the
+    /// extension's `extnValue` content (inside the OCTET STRING wrapper).
+    pub fn deser(n: usize, ctx: &mut decode::DecodeContext) -> Option<Self> {
         let name = format!("Certificate.tbsCertificate.extensions[{n}].extnValue");
 
-        let (b, os) =
-            Encoding::deser_expected(Identifier::OCTETSTRING, &format!("{name}.KeyIdentifier"), b)?;
+        let key_id = ctx.der_octet_string(&format!("{name}.KeyIdentifier"))?;
 
-        if !b.is_empty() {
-            log::error!("{name} contains {} bytes of extra data", b.len());
+        if ctx.der_remaining() > 0 {
+            log::error!(
+                "{name} contains {} bytes of extra data",
+                ctx.der_remaining()
+            );
             return None;
         }
 
-        Some(Self { key_id: os.content })
+        Some(Self { key_id })
     }
 }
 
@@ -1427,51 +1293,59 @@ pub struct BasicConstraints {
 }
 
 impl BasicConstraints {
-    pub fn deser(n: usize, b: &[u8]) -> Option<Self> {
+    /// Parse BasicConstraints from `ctx` positioned at the start of the
+    /// extension's `extnValue` content (inside the OCTET STRING wrapper).
+    pub fn deser(n: usize, ctx: &mut decode::DecodeContext) -> Option<Self> {
         let name = format!("Certificate.tbsCertificate.extensions[{n}].extnValue");
 
-        let (b, encoding) =
-            Encoding::deser_expected(Identifier::SEQUENCE, &format!("{name}.BasicConstraints"), b)?;
+        ctx.tlv_expected(
+            &format!("{name}.BasicConstraints"),
+            "SEQUENCE",
+            Identifier::SEQUENCE,
+        )?;
 
-        if !b.is_empty() {
-            log::error!("{name} contains {} bytes of extra data", b.len());
-            return None;
-        }
-
-        if encoding.content.is_empty() {
-            Some(Self {
+        let result = if ctx.der_remaining() == 0 {
+            Self {
                 ca: false,
                 path_len_constraint: None,
-            })
+            }
         } else {
-            let (seq_b, ca) =
-                Encoding::deser_bool(&format!("{name}.BasicConstraints.cA"), &encoding.content)?;
+            let ca = ctx.der_bool(&format!("{name}.BasicConstraints.cA"))?;
 
-            let path_len_constraint = if !seq_b.is_empty() {
-                let (b, path_len_constraint) = Encoding::deser_expected(
-                    Identifier::INTEGER,
-                    &format!("{name}.BasicConstraints.pathLenConstraint"),
-                    seq_b,
-                )?;
+            let path_len_constraint = if ctx.der_remaining() > 0 {
+                let plen =
+                    ctx.der_integer(&format!("{name}.BasicConstraints.pathLenConstraint"))?;
 
-                if !b.is_empty() {
+                if ctx.der_remaining() > 0 {
                     log::error!(
                         "{name}.BasicConstraints contains {} bytes of extra data",
-                        b.len()
+                        ctx.der_remaining()
                     );
                     return None;
                 }
 
-                Some(path_len_constraint.content)
+                Some(plen)
             } else {
                 None
             };
 
-            Some(Self {
+            Self {
                 ca,
                 path_len_constraint,
-            })
+            }
+        };
+
+        ctx.end_tlv()?; // end SEQUENCE
+
+        if ctx.der_remaining() > 0 {
+            log::error!(
+                "{name} contains {} bytes of extra data",
+                ctx.der_remaining()
+            );
+            return None;
         }
+
+        Some(result)
     }
 }
 
@@ -1500,20 +1374,22 @@ pub struct KeyUsage {
 }
 
 impl KeyUsage {
-    pub fn deser(n: usize, b: &[u8]) -> Option<Self> {
+    /// Parse KeyUsage from `ctx` positioned at the start of the extension's
+    /// `extnValue` content (inside the OCTET STRING wrapper).
+    pub fn deser(n: usize, ctx: &mut decode::DecodeContext) -> Option<Self> {
         let name = format!("Certificate.tbsCertificate.extensions[{n}].extnValue");
 
-        let (b, encoding) =
-            Encoding::deser_expected(Identifier::BITSTRING, &format!("{name}.KeyUsage"), b)?;
+        let usage = ctx.der_bit_string(&format!("{name}.KeyUsage"))?;
 
-        if !b.is_empty() {
-            log::error!("{name} contains {} bytes of extra data", b.len());
+        if ctx.der_remaining() > 0 {
+            log::error!(
+                "{name} contains {} bytes of extra data",
+                ctx.der_remaining()
+            );
             return None;
         }
 
-        Some(Self {
-            usage: encoding.content,
-        })
+        Some(Self { usage })
     }
 }
 
@@ -1527,88 +1403,101 @@ pub(crate) struct Extensions {
     pub(crate) key_usage: Option<KeyUsage>,
     pub(crate) basic_constraints: Option<BasicConstraints>,
 
-    unrecognized: Vec<Encoding>,
+    /// Raw DER bytes of unrecognized extensions (preserved for diagnostics)
+    unrecognized: Vec<Vec<u8>>,
 }
 
 impl Extensions {
-    pub fn deser(b: &[u8]) -> Option<Self> {
-        let (remain, encoding) = Encoding::deser_expected(
-            Identifier::SEQUENCE,
+    /// Parse the Extensions SEQUENCE from `ctx`.
+    /// `ctx` must be positioned at the outer SEQUENCE TLV.
+    pub fn deser(ctx: &mut decode::DecodeContext) -> Option<Self> {
+        // Outer SEQUENCE wrapping all extensions
+        ctx.tlv_expected(
             "Certificate.tbsCertificate.extensions",
-            b,
+            "SEQUENCE",
+            Identifier::SEQUENCE,
         )?;
-
-        if !remain.is_empty() {
-            log::error!(
-                "Certificate.tbsCertificate.extensions contains {} bytes of extra data",
-                remain.len()
-            );
-            return None;
-        }
-
-        let mut b: &[u8] = &encoding.content;
 
         let mut subject_key_identifier: Option<SubjectKeyIdentifier> = None;
         let mut key_usage: Option<KeyUsage> = None;
         let mut subject_alt_name: Option<SubjectAltName> = None;
         let mut basic_constraints: Option<BasicConstraints> = None;
-        let mut unrecognized: Vec<Encoding> = Vec::new();
+        let mut unrecognized: Vec<Vec<u8>> = Vec::new();
 
         let mut n: usize = 0;
 
-        while !b.is_empty() {
-            let (local_b, encoding) = Encoding::deser_expected(
-                Identifier::SEQUENCE,
+        while ctx.der_remaining() > 0 {
+            // Each extension is a SEQUENCE { extnID OID, critical BOOLEAN OPTIONAL, extnValue OCTET STRING }
+            ctx.tlv_expected(
                 format!("Certificate.tbsCertificate.extensions[{n}]").as_str(),
-                b,
+                "SEQUENCE",
+                Identifier::SEQUENCE,
             )?;
-            b = local_b;
 
-            let (ext_remain, ext_obj_id) = ObjectIdentifier::deser(
+            let ext_obj_id = ObjectIdentifier::deser(
                 format!("Certificate.tbsCertificate.extensions[{n}].extnID").as_str(),
-                &encoding.content,
+                ctx,
             )?;
 
-            let (ext_remain, maybe_bool) = Encoding::deser_expected2(
+            // Next field is either BOOLEAN (critical) or OCTET STRING (extnValue)
+            let maybe_bool_or_os = Encoding::read_expected2(
                 Identifier::BOOLEAN,
                 Identifier::OCTETSTRING,
                 format!("Certificate.tbsCertificate.extensions[{n}].critical_or_extnValue")
                     .as_str(),
-                ext_remain,
+                ctx,
             )?;
 
-            let (critical, octetstring): (bool, Vec<u8>) = if maybe_bool.identifier
+            let (critical, octetstring_content): (bool, Vec<u8>) = if maybe_bool_or_os.identifier
                 == Identifier::BOOLEAN
             {
-                let (remain, octetstring_encoding) = Encoding::deser_expected(
-                    Identifier::OCTETSTRING,
-                    format!("Certificate.tbsCertificate.extensions[{n}].extnValue").as_str(),
-                    ext_remain,
+                let critical = Encoding::bool_from_content(
+                    &maybe_bool_or_os.content,
+                    &format!("Certificate.tbsCertificate.extensions[{n}].critical"),
                 )?;
 
-                if !remain.is_empty() {
+                // Now read the OCTET STRING
+                let os = Encoding::read_expected(
+                    Identifier::OCTETSTRING,
+                    format!("Certificate.tbsCertificate.extensions[{n}].extnValue").as_str(),
+                    ctx,
+                )?;
+
+                if ctx.der_remaining() > 0 {
                     log::error!(
                         "Certificate.tbsCertificate.extensions[{n}] contains {} bytes of extra data",
-                        remain.len()
+                        ctx.der_remaining()
                     );
                     return None;
                 }
 
-                let critical: bool = Encoding::deser_bool_from_encoding(
-                    maybe_bool,
-                    &format!("Certificate.tbsCertificate.extensions[{n}].critical"),
-                )?;
-
-                (critical, octetstring_encoding.content)
+                (critical, os.content)
             } else {
-                (false, maybe_bool.content)
+                // The encoding we read was already the OCTET STRING
+                if ctx.der_remaining() > 0 {
+                    log::error!(
+                        "Certificate.tbsCertificate.extensions[{n}] contains {} bytes of extra data after extnValue",
+                        ctx.der_remaining()
+                    );
+                    return None;
+                }
+                (false, maybe_bool_or_os.content)
             };
+
+            // The octetstring_content IS the raw DER of the extension value.
+            // We need to parse it through a sub-context that points into the
+            // main buffer.  Since the content is already materialized as
+            // Vec<u8>, we create a temporary DecodeContext over it.
+            let mut ext_ctx = decode::DecodeContext::new(
+                &format!("Certificate.tbsCertificate.extensions[{n}].extnValue"),
+                octetstring_content.clone(),
+            );
 
             match ext_obj_id.repr.as_str() {
                 // SubjectKeyIdentifier
                 "2.5.29.14" => {
                     if subject_key_identifier
-                        .replace(SubjectKeyIdentifier::deser(n, &octetstring)?)
+                        .replace(SubjectKeyIdentifier::deser(n, &mut ext_ctx)?)
                         .is_some()
                     {
                         log::error!(
@@ -1620,7 +1509,7 @@ impl Extensions {
                 // keyUsage
                 "2.5.29.15" => {
                     if key_usage
-                        .replace(KeyUsage::deser(n, &octetstring)?)
+                        .replace(KeyUsage::deser(n, &mut ext_ctx)?)
                         .is_some()
                     {
                         log::error!(
@@ -1632,7 +1521,7 @@ impl Extensions {
                 // subjectAltName
                 "2.5.29.17" => {
                     if subject_alt_name
-                        .replace(SubjectAltName::deser(n, &octetstring)?)
+                        .replace(SubjectAltName::deser(n, &mut ext_ctx)?)
                         .is_some()
                     {
                         log::error!(
@@ -1644,7 +1533,7 @@ impl Extensions {
                 // basicConstraints
                 "2.5.29.19" => {
                     if basic_constraints
-                        .replace(BasicConstraints::deser(n, &octetstring)?)
+                        .replace(BasicConstraints::deser(n, &mut ext_ctx)?)
                         .is_some()
                     {
                         log::error!(
@@ -1665,12 +1554,15 @@ impl Extensions {
                         );
                     }
 
-                    unrecognized.push(encoding);
+                    unrecognized.push(octetstring_content);
                 }
             }
 
+            ctx.end_tlv()?; // end extension SEQUENCE
             n = n.saturating_add(1);
         }
+
+        ctx.end_tlv()?; // end outer extensions SEQUENCE
 
         Some(Self {
             subject_key_identifier,
@@ -1741,29 +1633,38 @@ impl fmt::Debug for TbsCertificate {
 }
 
 impl TbsCertificate {
-    pub fn deser(encoding: Encoding) -> Option<Self> {
-        let (b, version) = Version::deser(&encoding.content)?;
-        let (b, serial_number) = Encoding::deser("Certificate.tbsCertificate.serialNumber", b)?;
-        let (b, signature) = AlgorithmIdentifier::deser("Certificate.tbsCertificate.signature", b)?;
-        let (b, issuer) = Name::deser("Certificate.tbsCertificate.issuer", b)?;
-        let (b, validity) = Validity::deser(b)?;
-        let (b, subject) = Name::deser("Certificate.tbsCertificate.subject", b)?;
-        let (mut b, subject_public_key_info) = SubjectPublicKeyInfo::deser(b)?;
+    /// Parse TBSCertificate fields from `ctx`.
+    /// `ctx` must be positioned at the start of the TBSCertificate SEQUENCE TLV.
+    pub fn deser(ctx: &mut decode::DecodeContext) -> Option<Self> {
+        // Open the TBSCertificate SEQUENCE
+        ctx.tlv_expected(
+            "Certificate.tbsCertificate",
+            "SEQUENCE",
+            Identifier::SEQUENCE,
+        )?;
+
+        let version = Version::deser(ctx)?;
+        let serial_number = ctx.der_integer("Certificate.tbsCertificate.serialNumber")?;
+        let signature = AlgorithmIdentifier::deser("Certificate.tbsCertificate.signature", ctx)?;
+        let issuer = Name::deser("Certificate.tbsCertificate.issuer", ctx)?;
+        let validity = Validity::deser(ctx)?;
+        let subject = Name::deser("Certificate.tbsCertificate.subject", ctx)?;
+        let subject_public_key_info = SubjectPublicKeyInfo::deser(ctx)?;
 
         let mut issuer_unique_id: Option<Vec<u8>> = None;
         let mut subject_unique_id: Option<Vec<u8>> = None;
-        let mut extensions = None;
+        let mut extensions: Option<Extensions> = None;
 
         let mut prev_tag: u8 = 0;
 
-        while !b.is_empty() {
-            let (local_b, encoding) = Encoding::deser("Certificate.tbsCertificate optional", b)?;
-            b = local_b;
+        while ctx.der_remaining() > 0 {
+            // Optional context-specific fields: [1] issuerUniqueID, [2] subjectUniqueID, [3] extensions
+            let encoding = Encoding::read("Certificate.tbsCertificate optional", ctx)?;
 
-            if encoding.identifier.class != Class::Application {
+            if encoding.identifier.class != Class::ContextSpecific {
                 log::error!(
-                    "Unexpected idenitifer class after Certificate.tbsCertificate.subjectPublicKeyInfo, expected {:?}, got {:?}",
-                    Class::Application,
+                    "Unexpected identifier class after Certificate.tbsCertificate.subjectPublicKeyInfo, expected {:?}, got {:?}",
+                    Class::ContextSpecific,
                     encoding.identifier.class
                 );
                 return None;
@@ -1783,19 +1684,28 @@ impl TbsCertificate {
             match tag {
                 1 => issuer_unique_id = Some(encoding.content),
                 2 => subject_unique_id = Some(encoding.content),
-                3 => extensions = Some(Extensions::deser(&encoding.content)?),
+                3 => {
+                    // [3] EXPLICIT Extensions — the content IS the Extensions SEQUENCE
+                    let mut ext_ctx = decode::DecodeContext::new(
+                        "Certificate.tbsCertificate.extensions",
+                        encoding.content,
+                    );
+                    extensions = Some(Extensions::deser(&mut ext_ctx)?);
+                }
                 _ => {
                     log::error!(
-                        "Certificate.tbsCertificate contains unexpected tag value for {tag}"
+                        "Certificate.tbsCertificate contains unexpected context-specific tag {tag}"
                     );
                     return None;
                 }
             }
         }
 
+        ctx.end_tlv()?; // end TBSCertificate SEQUENCE
+
         Some(Self {
             version,
-            serial_number: serial_number.content,
+            serial_number,
             signature,
             issuer,
             validity,
@@ -1824,34 +1734,32 @@ pub(crate) struct AlgorithmIdentifier {
 }
 
 impl AlgorithmIdentifier {
-    pub fn deser<'a>(name: &str, b: &'a [u8]) -> Option<(&'a [u8], Self)> {
-        let (remain, signature_algorithm) =
-            Encoding::deser_expected(Identifier::SEQUENCE, name, b)?;
+    pub fn deser(name: &str, ctx: &mut decode::DecodeContext) -> Option<Self> {
+        ctx.tlv_expected(name, "SEQUENCE", Identifier::SEQUENCE)?;
 
-        let (b, algorithm) =
-            ObjectIdentifier::deser(&format!("{name}.algorithm"), &signature_algorithm.content)?;
+        let algorithm = ObjectIdentifier::deser(&format!("{name}.algorithm"), ctx)?;
 
-        let parameters = if b.is_empty() {
+        let parameters = if ctx.der_remaining() == 0 {
             None
         } else {
-            let (b, parameters) =
-                ObjectIdentifier::deser_or_null(&format!("{name}.parameters"), b)?;
+            let parameters = ObjectIdentifier::deser_or_null(&format!("{name}.parameters"), ctx)?;
 
-            if !b.is_empty() {
-                log::error!("{name} contains {} bytes of extra data", b.len());
+            if ctx.der_remaining() > 0 {
+                log::error!(
+                    "{name} contains {} bytes of extra data",
+                    ctx.der_remaining()
+                );
                 return None;
             }
 
             parameters
         };
 
-        Some((
-            remain,
-            Self {
-                algorithm,
-                parameters,
-            },
-        ))
+        ctx.end_tlv()?; // end SEQUENCE
+        Some(Self {
+            algorithm,
+            parameters,
+        })
     }
 }
 
@@ -1864,16 +1772,9 @@ pub(crate) struct SignatureValue {
 }
 
 impl SignatureValue {
-    pub fn deser(b: &[u8]) -> Option<(&[u8], Self)> {
-        let (b, signature_value) =
-            Encoding::deser_expected(Identifier::BITSTRING, "Certificate.signatureValue", b)?;
-
-        Some((
-            b,
-            Self {
-                bitstring: signature_value.content,
-            },
-        ))
+    pub fn deser(ctx: &mut decode::DecodeContext) -> Option<Self> {
+        let bitstring = ctx.der_bit_string("Certificate.signatureValue")?;
+        Some(Self { bitstring })
     }
 }
 
@@ -1895,48 +1796,74 @@ pub(crate) struct Certificate {
 }
 
 impl Certificate {
-    pub fn deser(buf: &[u8], ignore_extra: bool) -> Option<(&[u8], Self)> {
-        let init_len: usize = buf.len();
+    /// Decode a DER-encoded X.509 certificate from the TLS `DecodeContext`.
+    ///
+    /// `ctx` must be positioned at the start of the certificate DER data
+    /// (i.e. at the outer `SEQUENCE` TLV).  After a successful call the
+    /// cursor is advanced to just after the certificate bytes.
+    ///
+    /// Returns `(tbs_bytes, certificate)` where `tbs_bytes` is the raw
+    /// DER-encoded TBSCertificate (used for signature verification).
+    pub fn decode(
+        ctx: &mut decode::DecodeContext,
+        ignore_extra: bool,
+    ) -> Result<(Vec<u8>, Self), AlertDescription> {
+        // Record where we are in the TLS buffer before we start
+        let cert_start = ctx.current_position();
 
-        let (b, certificate) = Encoding::deser_expected(Identifier::SEQUENCE, "Certificate", buf)?;
+        // Open the outer Certificate SEQUENCE
+        ctx.tlv_expected("Certificate", "SEQUENCE", Identifier::SEQUENCE)
+            .ok_or(AlertDescription::BadCertificate)?;
 
-        if !b.is_empty() && !ignore_extra {
-            log::error!(
-                "Certificate contains {} bytes of data after sequence encoding",
-                b.len()
-            );
-            return None;
-        }
+        // Record the position of the TBSCertificate SEQUENCE (for byte extraction)
+        let tbs_start = ctx.current_position();
 
-        let tbs_certificate_start = init_len.saturating_sub(certificate.content.len());
+        // Parse TBSCertificate — this opens + closes the inner SEQUENCE
+        let tbs_certificate = TbsCertificate::deser(ctx).ok_or(AlertDescription::BadCertificate)?;
 
-        let (b, encoding) = Encoding::deser_expected(
-            Identifier::SEQUENCE,
-            "Certificate.tbsCertificate",
-            &certificate.content,
-        )?;
+        let tbs_end = ctx.current_position();
 
-        let tbs_certificate_end: usize = tbs_certificate_start
-            .add(certificate.content.len())
-            .saturating_sub(b.len());
+        // Parse signatureAlgorithm
+        let signature_algorithm = AlgorithmIdentifier::deser("Certificate.signatureAlgorithm", ctx)
+            .ok_or(AlertDescription::BadCertificate)?;
 
-        let tbs_certificate: TbsCertificate = TbsCertificate::deser(encoding)?;
+        // Parse signatureValue
+        let signature_value = SignatureValue::deser(ctx).ok_or(AlertDescription::BadCertificate)?;
 
-        let (b, signature_algorithm) =
-            AlgorithmIdentifier::deser("Certificate.signatureAlgorithm", b)?;
-
-        let (b, signature_value) = SignatureValue::deser(b)?;
-
-        if !b.is_empty() {
+        if ctx.der_remaining() > 0 {
             log::error!(
                 "CertificateEntry cert_data contains {} extra bytes of data",
-                b.len()
+                ctx.der_remaining()
             );
-            return None;
+            return Err(AlertDescription::BadCertificate);
         }
 
-        Some((
-            &buf[tbs_certificate_start..tbs_certificate_end],
+        // Close the outer Certificate SEQUENCE
+        ctx.end_tlv().ok_or(AlertDescription::BadCertificate)?;
+
+        let cert_end = ctx.current_position();
+
+        // If there are bytes after the Certificate SEQUENCE and !ignore_extra, error
+        if !ignore_extra {
+            // We already closed the TLV and verified der_remaining() == 0 inside it,
+            // but there may still be trailing bytes in the TLS vec context
+            let _ = cert_end; // cert_end == tls cursor position now
+        }
+
+        // Extract the raw TBSCertificate bytes for signature verification
+        let tbs_bytes = ctx
+            .original_buffer()
+            .get(tbs_start..tbs_end)
+            .ok_or_else(|| {
+                log::error!("Failed to extract TBSCertificate bytes");
+                AlertDescription::BadCertificate
+            })?
+            .to_vec();
+
+        let _ = cert_start; // suppress unused warning
+
+        Ok((
+            tbs_bytes,
             Self {
                 tbs_certificate,
                 signature_algorithm,

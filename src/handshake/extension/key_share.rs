@@ -1,4 +1,4 @@
-use crate::{alert::AlertDescription, handshake::named_group::NamedGroup, parse};
+use crate::{alert::AlertDescription, decode::DecodeContext, handshake::named_group::NamedGroup};
 
 /// Unrecognized KeyShare entry.
 #[derive(Debug, Clone)]
@@ -66,11 +66,12 @@ impl KeyShareEntry {
         buf
     }
 
-    pub fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let (b, group) = parse::u16("KeyShareEntry.group", b)?;
-        let (b, key_exchange) = parse::vec16("KeyShareEntry.key_exchange", b, 1, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let group: u16 = ctx.u16("group", "NamedGroup")?;
 
         let named_group = NamedGroup::try_from(group);
+
+        let key_exchange: Vec<u8> = ctx.vec16("key_exchange", "opaque<1..2^16-1>", 1, 1)?;
 
         match named_group {
             Ok(NamedGroup::secp256r1) => {
@@ -78,46 +79,45 @@ impl KeyShareEntry {
 
                 if key_exchange.len() != P256_CLIENT_SHARE_LEN_EXPECTED {
                     log::error!(
-                        "ClientHello KeyShareEntry secp256r1 has key_exchange length {} expected {}",
+                        "{:?} secp256r1 has key_exchange length {} expected {}",
+                        ctx,
                         key_exchange.len(),
                         P256_CLIENT_SHARE_LEN_EXPECTED
                     );
                     return Err(AlertDescription::DecodeError)?;
                 }
 
-                match p256::PublicKey::from_sec1_bytes(key_exchange) {
-                    Ok(pk) => Ok((b, Self::Secp256r1(pk))),
+                match p256::PublicKey::from_sec1_bytes(&key_exchange) {
+                    Ok(pk) => Ok(Self::Secp256r1(pk)),
                     Err(_) => {
                         log::error!(
-                            "ClientHello KeyShareEntry secp256r1 key_exchange data is not a valid SEC1 public key"
+                            "{:?} secp256r1 key_exchange data is not a valid SEC1 public key",
+                            ctx
                         );
                         Err(AlertDescription::DecodeError)
                     }
                 }
             }
             Ok(NamedGroup::x25519) => {
-                let key_exact: [u8; 32] = match key_exchange.try_into() {
+                let key_exact: [u8; 32] = match key_exchange.clone().try_into() {
                     Ok(key) => key,
                     Err(_) => {
                         log::error!(
-                            "ClientHello KeyShareEntry x25519 has key_exchange length {} expected 32",
+                            "{:?} x25519 has key_exchange length {} expected 32",
+                            ctx,
                             key_exchange.len(),
                         );
                         return Err(AlertDescription::DecodeError)?;
                     }
                 };
-                Ok((
-                    b,
-                    Self::X25519(crate::crypto::x25519::PublicKey::from(key_exact)),
-                ))
+                Ok(Self::X25519(crate::crypto::x25519::PublicKey::from(
+                    key_exact,
+                )))
             }
-            Err(_) | Ok(_) => Ok((
-                b,
-                Self::Unrecognized(UnrecognizedKeyShareEntry {
-                    group: named_group,
-                    key_exchange: key_exchange.to_vec(),
-                }),
-            )),
+            Err(_) | Ok(_) => Ok(Self::Unrecognized(UnrecognizedKeyShareEntry {
+                group: named_group,
+                key_exchange: key_exchange.to_vec(),
+            })),
         }
     }
 }
@@ -139,17 +139,20 @@ pub(crate) struct KeyShareClientHello {
 }
 
 impl KeyShareClientHello {
-    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (_, mut b) = parse::vec16("KeyShareClientHello client_shares", b, 0, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec16("client_shares", "KeyShareEntry<0..2^16-1>", 0, 1)?;
 
         let mut client_shares: Vec<KeyShareEntry> = Vec::new();
-
-        while !b.is_empty() {
-            let (new_b, client_share) = KeyShareEntry::deser(b)?;
-            b = new_b;
-
+        let mut index = 0;
+        while ctx.remaining() > 0 {
+            ctx.begin_element("client_share", "KeyShareEntry", index);
+            let client_share = KeyShareEntry::decode(ctx)?;
             client_shares.push(client_share);
+            ctx.end_element();
+            index += 1;
         }
+
+        ctx.end_vec()?;
 
         Ok(Self { client_shares })
     }
@@ -196,11 +199,11 @@ pub(crate) enum KeyShareServerHello {
 }
 
 impl KeyShareServerHello {
-    pub fn deser(b: &[u8], retry_request: bool) -> Result<(&[u8], Self), AlertDescription> {
+    pub fn decode(ctx: &mut DecodeContext, retry_request: bool) -> Result<Self, AlertDescription> {
         if retry_request {
-            let (b, group) = parse::u16("KeyShareHelloRetryRequest.selected_group", b)?;
+            let selected_group = ctx.u16("selected_group", "NamedGroup")?;
 
-            let named_group: NamedGroup = match NamedGroup::try_from(group) {
+            let named_group: NamedGroup = match NamedGroup::try_from(selected_group) {
                 Ok(ng) => ng,
                 Err(val) => {
                     // Upon receipt of this extension in a HelloRetryRequest, the client
@@ -211,16 +214,24 @@ impl KeyShareServerHello {
                     // in the original ClientHello.  If either of these checks fails, then
                     // the client MUST abort the handshake with an "illegal_parameter"
                     // alert.
-                    log::error!(
-                        "ServerHello.extensions.KeyShareHelloRetryRequest selected an unknown named group 0x{val:04x}"
-                    );
+                    log::error!("{:?} selected an unknown named group 0x{val:04x}", ctx);
                     return Err(AlertDescription::IllegalParameter);
                 }
             };
-            Ok((b, Self::KeyShareHelloRetryRequest(named_group)))
+            Ok(Self::KeyShareHelloRetryRequest(named_group))
         } else {
-            let (b, kse) = KeyShareEntry::deser(b)?;
-            Ok((b, Self::KeyShareServerHello(kse)))
+            let kse = KeyShareEntry::decode(ctx)?;
+            Ok(Self::KeyShareServerHello(kse))
         }
     }
 }
+
+// #[cfg(test)]
+// mod tests {
+//     use super::*;
+//
+//     #[test]
+//     fn key_share_server_hello_decode() {
+//         todo!()
+//     }
+// }

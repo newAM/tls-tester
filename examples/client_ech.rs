@@ -116,7 +116,7 @@ fn query_ech_config_with_curl(domain: &str) -> ECHConfigList {
     }
     let ech_bytes: &[u8] = &data[7..];
 
-    ECHConfigList::deser(ech_bytes).expect("Failed to deserialize ECHConfigList")
+    ECHConfigList::from_bytes(ech_bytes).expect("Failed to decode ECHConfigList")
 }
 
 fn main() {

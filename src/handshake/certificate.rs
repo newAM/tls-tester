@@ -1,4 +1,4 @@
-use crate::{alert::AlertDescription, parse, x509};
+use crate::{alert::AlertDescription, decode::DecodeContext, x509};
 
 use super::extension::signature_scheme::SignatureScheme;
 
@@ -48,21 +48,19 @@ pub(crate) struct CertificateEntry {
 }
 
 impl CertificateEntry {
-    pub fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let (b, data): (_, &[u8]) = parse::vec24("CertificateEntry cert_data", b, 1, 1)?;
-        let (b, extensions): (_, &[u8]) = parse::vec16("CertificateEntry extensions", b, 0, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec24("cert_data", "opaque<1..2^24-1>", 1, 1)?;
 
-        let (tbs_certificate_bytes, data): (&[u8], x509::Certificate) =
-            x509::Certificate::deser(data, false).ok_or(AlertDescription::BadCertificate)?;
+        let (tbs_certificate_bytes, data) = x509::Certificate::decode(ctx, false)?;
+        ctx.end_vec()?;
 
-        Ok((
-            b,
-            Self {
-                data,
-                tbs_certificate: tbs_certificate_bytes.into(),
-                extensions: extensions.into(),
-            },
-        ))
+        let extensions: Vec<u8> = ctx.vec16("extensions", "Extension<0..2^16-1>", 0, 1)?;
+
+        Ok(Self {
+            data,
+            tbs_certificate: tbs_certificate_bytes,
+            extensions,
+        })
     }
 }
 
@@ -82,31 +80,24 @@ pub(crate) struct Certificate {
 }
 
 impl Certificate {
-    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (b, request_context): (_, &[u8]) =
-            parse::vec8("Certificate certificate_request_context", b, 0, 1)?;
-        let (remain, mut certificate_list_data): (_, &[u8]) =
-            parse::vec24("Certificate certificate_list", b, 0, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let request_context: Vec<u8> =
+            ctx.vec8("certificate_request_context", "opaque<0..2^8-1>", 0, 1)?;
 
-        if !remain.is_empty() {
-            log::error!(
-                "Certificate contains {} bytes of data after certificate_list",
-                remain.len()
-            );
-            return Err(AlertDescription::DecodeError)?;
-        }
+        ctx.begin_vec24("certificate_list", "CertificateEntry<0..2^24-1>", 0, 1)?;
 
         let mut certificate_list: Vec<CertificateEntry> = Vec::new();
 
-        while !certificate_list_data.is_empty() {
-            let (b, entry) = CertificateEntry::deser(certificate_list_data)?;
-            certificate_list_data = b;
-
+        while ctx.remaining() > 0 {
+            let entry = CertificateEntry::decode(ctx)?;
             certificate_list.push(entry);
         }
 
+        ctx.end_vec()?;
+        ctx.ensure_fully_consumed()?;
+
         Ok(Self {
-            request_context: request_context.into(),
+            request_context,
             certificate_list,
         })
     }
@@ -172,9 +163,9 @@ impl CertificateVerify {
         buf
     }
 
-    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (b, algorithm): (_, u16) = parse::u16("CertificateVerify.algorithm", b)?;
-        let (b, signature): (_, &[u8]) = parse::vec16("CertificateVerify.signature", b, 0, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let algorithm: u16 = ctx.u16("algorithm", "SignatureScheme")?;
+        let signature: Vec<u8> = ctx.vec16("signature", "opaque<0..2^16-1>", 0, 1)?;
 
         let algorithm: SignatureScheme = match SignatureScheme::try_from(algorithm) {
             Ok(algorithm) => algorithm,
@@ -184,14 +175,11 @@ impl CertificateVerify {
             }
         };
 
-        if !b.is_empty() {
-            log::error!("CertificateVerify contains {} extra bytes of data", b.len());
-            return Err(AlertDescription::DecodeError)?;
-        }
+        ctx.ensure_fully_consumed()?;
 
         Ok(Self {
             algorithm,
-            signature: signature.to_vec(),
+            signature,
         })
     }
 }

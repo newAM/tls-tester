@@ -2,7 +2,7 @@
 
 use crate::crypto::hpke::{AeadId, KdfId, KemId};
 use crate::handshake::extension::ExtensionType;
-use crate::{AlertDescription, parse};
+use crate::{AlertDescription, decode::DecodeContext};
 
 /// # References
 ///
@@ -25,14 +25,14 @@ impl From<ECHClientHelloType> for u8 {
 }
 
 impl ECHClientHelloType {
-    pub(crate) fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let (remain, ech_type) = parse::u8("ECHClientHello.type", b)?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let ech_type = ctx.u8("type", "ECHClientHelloType")?;
 
         match ech_type {
-            0 => Ok((remain, ECHClientHelloType::Outer)),
-            1 => Ok((remain, ECHClientHelloType::Inner)),
+            0 => Ok(ECHClientHelloType::Outer),
+            1 => Ok(ECHClientHelloType::Inner),
             x => {
-                log::error!("Invalid value for ECHClientHelloType: 0x{x:02x}");
+                log::error!("{} invalid value: 0x{x:02x}", ctx.current_path());
                 Err(AlertDescription::DecodeError)
             }
         }
@@ -56,15 +56,14 @@ pub(crate) struct HpkeSymmetricCipherSuite {
 }
 
 impl HpkeSymmetricCipherSuite {
-    pub(crate) fn deser<'a>(name: &str, b: &'a [u8]) -> Result<(&'a [u8], Self), AlertDescription> {
-        let (b, kdf_id) = parse::u16("ECHConfig.contents.key_config.cipher_suites.kdf_id", b)?;
-        let (b, aead_id) = parse::u16("ECHConfig.contents.key_config.cipher_suites.aead_id", b)?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let kdf_id = ctx.u16("kdf_id", "HpkeKdfId")?;
+        let aead_id = ctx.u16("aead_id", "HpkeAeadId")?;
 
         let kdf_id: KdfId = match KdfId::try_from(kdf_id) {
             Ok(kdf_id) => kdf_id,
             Err(e) => {
-                // TODO: fix name
-                log::warn!("{name}.kdf_id unknown value 0x{e:04X}");
+                log::warn!("{} unknown kdf_id value 0x{e:04X}", ctx.current_path());
                 return Err(AlertDescription::IllegalParameter);
             }
         };
@@ -72,12 +71,12 @@ impl HpkeSymmetricCipherSuite {
         let aead_id: AeadId = match AeadId::try_from(aead_id) {
             Ok(aead_id) => aead_id,
             Err(e) => {
-                log::error!("{name}.aead_id unknown value 0x{e:04X}");
+                log::error!("{} unknown aead_id value 0x{e:04X}", ctx.current_path());
                 return Err(AlertDescription::IllegalParameter);
             }
         };
 
-        Ok((b, Self { kdf_id, aead_id }))
+        Ok(Self { kdf_id, aead_id })
     }
 
     pub fn ser(&self) -> [u8; 4] {
@@ -113,43 +112,41 @@ pub(crate) struct HpkeKeyConfig {
 }
 
 impl HpkeKeyConfig {
-    pub(crate) fn deser(b: &[u8]) -> Option<(&[u8], Self)> {
-        let (b, config_id) = parse::u8("ECHConfig.contents.key_config.config_id", b).ok()?;
-        let (b, kem_id) = parse::u16("ECHConfig.contents.key_config.kem_id", b).ok()?;
-        let (b, public_key) =
-            parse::vec16("ECHConfig.contents.key_config.public_key", b, 1, 1).ok()?;
-        let (b, mut cipher_suites_buf) =
-            parse::vec16("ECHConfig.contents.key_config.public_key", b, 4, 4).ok()?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let config_id = ctx.u8("config_id", "uint8")?;
+        let kem_id = ctx.u16("kem_id", "HpkeKemId")?;
 
         let kem_id: KemId = match KemId::try_from(kem_id) {
             Ok(kem_id) => kem_id,
             Err(e) => {
-                log::warn!("ECHConfig.contents.key_config.kem_id ignoring unknown value 0x{e:04X}");
-                return None;
+                log::warn!("{} ignoring unknown value 0x{e:04X}", ctx.current_path());
+                return Err(AlertDescription::IllegalParameter);
             }
         };
+
+        let public_key = ctx.vec16("public_key", "opaque<1..2^16-1>", 1, 1)?;
+
+        ctx.begin_vec16("cipher_suites", "HpkeSymmetricCipherSuite<4..2^16-4>", 4, 4)?;
 
         let mut cipher_suites: Vec<HpkeSymmetricCipherSuite> = Vec::new();
         let mut n: usize = 0;
 
-        while !cipher_suites_buf.is_empty() {
-            let name: String = format!("ECHConfig.contents.key_config.cipher_suites[{n}]");
-            let (local_b, cipher_suite) =
-                HpkeSymmetricCipherSuite::deser(&name, cipher_suites_buf).ok()?;
-            cipher_suites_buf = local_b;
+        while ctx.remaining() > 0 {
+            ctx.begin_element("cipher_suite", "HpkeSymmetricCipherSuite", n);
+            let cipher_suite = HpkeSymmetricCipherSuite::decode(ctx)?;
+            ctx.end_element();
             cipher_suites.push(cipher_suite);
             n = n.saturating_add(1);
         }
 
-        Some((
-            b,
-            Self {
-                config_id,
-                kem_id,
-                public_key: public_key.to_vec(),
-                cipher_suites,
-            },
-        ))
+        ctx.end_vec()?;
+
+        Ok(Self {
+            config_id,
+            kem_id,
+            public_key,
+            cipher_suites,
+        })
     }
 
     pub(crate) fn ser(&self) -> Vec<u8> {
@@ -197,17 +194,11 @@ pub(crate) struct ECHConfigExtension {
 }
 
 impl ECHConfigExtension {
-    pub(crate) fn deser(b: &[u8]) -> Option<(&[u8], Self)> {
-        let (b, _type) = parse::u16("ECHConfig.contents.extensions.type", b).ok()?;
-        let (b, data) = parse::vec8("ECHConfig.contents.extensions.type", b, 0, 1).ok()?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let _type = ctx.u16("type", "ECHConfigExtensionType")?;
+        let data = ctx.vec8("data", "opaque<0..2^8-1>", 0, 1)?;
 
-        Some((
-            b,
-            Self {
-                _type,
-                data: data.to_vec(),
-            },
-        ))
+        Ok(Self { _type, data })
     }
 
     pub(crate) fn ser(&self) -> Vec<u8> {
@@ -247,32 +238,33 @@ pub(crate) struct ECHConfigContents {
 }
 
 impl ECHConfigContents {
-    pub(crate) fn deser(b: &[u8]) -> Option<(&[u8], Self)> {
-        let (b, key_config) = HpkeKeyConfig::deser(b)?;
-        let (b, maximum_name_length) =
-            parse::u8("ECHConfig.contents.maximum_name_length", b).ok()?;
-        let (b, public_name) = parse::vec8("ECHConfig.contents.public_name", b, 1, 1).ok()?;
-        let (b, mut extensions_data) =
-            parse::vec16("ECHConfig.contents.public_name", b, 0, 1).ok()?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let key_config = HpkeKeyConfig::decode(ctx)?;
+        let maximum_name_length = ctx.u8("maximum_name_length", "uint8")?;
+        let public_name_bytes = ctx.vec8("public_name", "opaque<1..255>", 1, 1)?;
+        let public_name: String = String::from_utf8_lossy(&public_name_bytes).to_string();
+
+        ctx.begin_vec16("extensions", "ECHConfigExtension<0..2^16-1>", 0, 1)?;
 
         let mut extensions: Vec<ECHConfigExtension> = Vec::new();
-        while !extensions_data.is_empty() {
-            let (remain, extension) = ECHConfigExtension::deser(extensions_data)?;
-            extensions_data = remain;
+        let mut n: usize = 0;
+
+        while ctx.remaining() > 0 {
+            ctx.begin_element("extension", "ECHConfigExtension", n);
+            let extension = ECHConfigExtension::decode(ctx)?;
+            ctx.end_element();
             extensions.push(extension);
+            n = n.saturating_add(1);
         }
 
-        let public_name: String = String::from_utf8_lossy(public_name).to_string();
+        ctx.end_vec()?;
 
-        Some((
-            b,
-            Self {
-                key_config,
-                maximum_name_length,
-                public_name,
-                extensions,
-            },
-        ))
+        Ok(Self {
+            key_config,
+            maximum_name_length,
+            public_name,
+            extensions,
+        })
     }
 
     pub(crate) fn ser(&self) -> Vec<u8> {
@@ -331,9 +323,9 @@ pub struct ECHConfig {
 impl ECHConfig {
     const VERSION_EXPECTED: u16 = 0xfe0d;
 
-    pub(crate) fn deser(b: &[u8]) -> Option<(&[u8], Option<Self>)> {
-        let (b, version) = parse::u16("ECHConfig.version", b).ok()?;
-        let (b, length) = parse::u16("ECHConfig.length", b).ok()?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Option<Self>, AlertDescription> {
+        let version = ctx.u16("version", "uint16")?;
+        let length = ctx.u16("length", "uint16")?;
 
         if version != Self::VERSION_EXPECTED {
             log::warn!(
@@ -343,19 +335,41 @@ impl ECHConfig {
             );
         }
 
-        match ECHConfigContents::deser(b) {
-            Some((b, contents)) => Some((
-                b,
-                Some(Self {
+        // Save the current position to check length later
+        let start_offset = ctx.current_position();
+
+        match ECHConfigContents::decode(ctx) {
+            Ok(contents) => {
+                // Verify the length matches
+                let bytes_consumed = ctx.current_position() - start_offset;
+                if bytes_consumed != usize::from(length) {
+                    log::warn!(
+                        "ECHConfig length mismatch: declared {} bytes but consumed {}",
+                        length,
+                        bytes_consumed
+                    );
+                }
+
+                Ok(Some(Self {
                     version,
                     length,
                     contents,
-                }),
-            )),
-            None => {
-                log::warn!("Skipping unrecognized ECHConfigContents");
-                let remain = b.get(usize::from(length)..)?;
-                Some((remain, None))
+                }))
+            }
+            Err(e) => {
+                log::warn!("Skipping unrecognized ECHConfigContents: {:?}", e);
+                // Skip the declared length of bytes
+                let bytes_to_skip = usize::from(length);
+                let current_pos = ctx.current_position();
+                let target_pos = current_pos + bytes_to_skip;
+
+                if target_pos <= ctx.original_buffer().len() {
+                    // Create a new context to skip the bytes
+                    ctx.advance(bytes_to_skip);
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
             }
         }
     }
@@ -420,29 +434,38 @@ pub struct ECHConfigList {
 }
 
 impl ECHConfigList {
-    /// Create an ECHConfigList from bytes.
-    pub fn deser(b: &[u8]) -> Option<Self> {
-        let (remain, mut ech_config_list) = parse::vec16("ECHConfigList", b, 4, 1).ok()?;
+    pub fn from_bytes(buf: &[u8]) -> Result<Self, AlertDescription> {
+        let mut ctx = DecodeContext::new("ECHConfigList", buf.to_vec());
+        Self::decode(&mut ctx)
+    }
+
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec16("ech_config_list", "ECHConfig<4..2^16-1>", 4, 1)?;
 
         let mut list: Vec<ECHConfig> = Vec::new();
+        let mut n: usize = 0;
 
-        while !ech_config_list.is_empty() {
-            let (new_ech_config_list, ech_config) = ECHConfig::deser(ech_config_list)?;
-            ech_config_list = new_ech_config_list;
-            if let Some(config) = ech_config {
-                list.push(config);
+        while ctx.remaining() > 0 {
+            ctx.begin_element("ech_config", "ECHConfig", n);
+            match ECHConfig::decode(ctx) {
+                Ok(Some(config)) => {
+                    list.push(config);
+                }
+                Ok(None) => {
+                    // Config was skipped due to parse error
+                }
+                Err(e) => {
+                    ctx.end_element();
+                    return Err(e);
+                }
             }
+            ctx.end_element();
+            n = n.saturating_add(1);
         }
 
-        if !remain.is_empty() {
-            log::error!(
-                "ECHConfigList contains {} bytes of extra data",
-                remain.len()
-            );
-            return None;
-        }
+        ctx.end_vec()?;
 
-        Some(Self { list })
+        Ok(Self { list })
     }
 
     /// Serialize into bytes.
@@ -501,16 +524,17 @@ pub(crate) enum ECHClientHello {
 }
 
 impl ECHClientHello {
-    pub(crate) fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (b, ech_type) = ECHClientHelloType::deser(b)?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let ech_type = ECHClientHelloType::decode(ctx)?;
 
         match ech_type {
-            ECHClientHelloType::Outer => Ok(Self::Outer(ECHClientHelloOuter::deser(b)?)),
+            ECHClientHelloType::Outer => Ok(Self::Outer(ECHClientHelloOuter::decode(ctx)?)),
             ECHClientHelloType::Inner => {
-                if !b.is_empty() {
+                if ctx.remaining() > 0 {
                     log::error!(
-                        "ECHClientHello with {ech_type:?} contains {} bytes of data, expected zero",
-                        b.len()
+                        "{} with {ech_type:?} contains {} bytes of data, expected zero",
+                        ctx.current_path(),
+                        ctx.remaining()
                     );
                     Err(AlertDescription::DecodeError)
                 } else {
@@ -539,24 +563,25 @@ pub(crate) struct ECHClientHelloOuter {
 }
 
 impl ECHClientHelloOuter {
-    pub(crate) fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (b, cipher_suite) = HpkeSymmetricCipherSuite::deser("ECHClientHello.cipher_suite", b)?;
-        let (b, config_id) = parse::u8("ECHClientHello.config_id", b)?;
-        let (b, enc) = parse::vec16("ECHClientHello.enc", b, 0, 1)?;
-        let (b, payload) = parse::vec16("ECHClientHello.payload", b, 1, 1)?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let cipher_suite = HpkeSymmetricCipherSuite::decode(ctx)?;
+        let config_id = ctx.u8("config_id", "uint8")?;
+        let enc = ctx.vec16("enc", "opaque<0..2^16-1>", 0, 1)?;
+        let payload = ctx.vec16("payload", "opaque<1..2^16-1>", 1, 1)?;
 
-        if !b.is_empty() {
+        if ctx.remaining() > 0 {
             log::error!(
-                "ECHClientHello outer contains {} bytes of trailing data",
-                b.len()
+                "{} contains {} bytes of trailing data",
+                ctx.current_path(),
+                ctx.remaining()
             );
             Err(AlertDescription::DecodeError)
         } else {
             Ok(Self {
                 cipher_suite,
                 config_id,
-                enc: enc.into(),
-                payload: payload.into(),
+                enc,
+                payload,
             })
         }
     }
@@ -607,32 +632,25 @@ pub(crate) struct OuterExtensions {
 }
 
 impl OuterExtensions {
-    pub(crate) fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (b, extensions) = parse::vec8("ClientHello.extensions.ech_outer_extensions", b, 2, 2)?;
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec8("outer_extensions", "ExtensionType<2..254>", 2, 2)?;
 
-        if !b.is_empty() {
-            log::error!(
-                "ClientHello.extensions.ech_outer_extensions contains {} bytes of trailing data",
-                b.len()
-            );
-            Err(AlertDescription::DecodeError)
-        } else {
-            Ok(Self {
-                types: extensions
-                    .chunks(2)
-                    .map(|chunk| {
-                        ExtensionType::try_from(u16::from_be_bytes(chunk.try_into().unwrap()))
-                    })
-                    .collect(),
-            })
+        let mut types: Vec<Result<ExtensionType, u16>> = Vec::new();
+        while ctx.remaining() > 0 {
+            let ext_type = ctx.u16("extension_type", "ExtensionType")?;
+            types.push(ExtensionType::try_from(ext_type));
         }
+
+        ctx.end_vec()?;
+
+        Ok(Self { types })
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AeadId, ECHConfig, ECHConfigContents, ECHConfigList, HpkeKeyConfig,
+        AeadId, DecodeContext, ECHConfig, ECHConfigContents, ECHConfigList, HpkeKeyConfig,
         HpkeSymmetricCipherSuite, KdfId, KemId,
     };
 
@@ -769,11 +787,13 @@ mod tests {
     }
 
     #[test]
-    fn ech_config_list_deser() {
-        let tls_ech_dev: ECHConfigList = ECHConfigList::deser(TLS_ECH_DEV_CONFIG_LIST).unwrap();
+    fn ech_config_list_decode() {
+        let mut ctx = DecodeContext::new("ECHConfigList", TLS_ECH_DEV_CONFIG_LIST.to_vec());
+        let tls_ech_dev: ECHConfigList = ECHConfigList::decode(&mut ctx).unwrap();
         assert_eq!(tls_ech_dev, tls_ech_dev_config_list());
 
-        let defo_ie: ECHConfigList = ECHConfigList::deser(DEFO_IE_CONFIG_LIST).unwrap();
+        let mut ctx = DecodeContext::new("ECHConfigList", DEFO_IE_CONFIG_LIST.to_vec());
+        let defo_ie: ECHConfigList = ECHConfigList::decode(&mut ctx).unwrap();
         assert_eq!(defo_ie, defo_io_config_list());
     }
 

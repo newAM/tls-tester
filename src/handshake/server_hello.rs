@@ -6,7 +6,10 @@ use crypto_bigint::{consts::U32, hybrid_array::Array};
 use rand::TryRng as _;
 use sha2::Digest;
 
-use crate::{AlertDescription, base, cipher_suite::CipherSuite, parse, tls_version::TlsVersion};
+use crate::{
+    AlertDescription, base, cipher_suite::CipherSuite, decode::DecodeContext,
+    tls_version::TlsVersion,
+};
 
 // https://datatracker.ietf.org/doc/html/rfc8446#section-4.1.3
 // For reasons of backward compatibility with middleboxes (see
@@ -200,55 +203,54 @@ pub struct ServerHello {
 }
 
 impl ServerHello {
-    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (b, legacy_version) = parse::u16("ServerHello.legacy_version", b)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let legacy_version = ctx.u16("legacy_version", "ProtocolVersion")?;
 
         if legacy_version != 0x0303 {
             log::error!(
-                "ServerHello.legacy_version 0x{legacy_version:04X} is not the required value of 0x0303"
+                "{} 0x{legacy_version:04X} is not the required value of 0x0303",
+                ctx.prev_path()
             );
             return Err(AlertDescription::IllegalParameter);
         }
 
-        let (b, random): (&[u8], [u8; 32]) = parse::fixed("ServerHello.random", b)?;
+        let random: [u8; 32] = ctx.fixed("random", "Random")?;
 
         let retry_request: bool = random == SERVER_HELLO_RETRY_RANDOM;
         if retry_request {
-            log::debug!("< ServerHello.random is a retry request");
+            log::debug!("< {} is a retry request", ctx.prev_path());
         }
 
-        let (b, legacy_session_id_echo) =
-            parse::vec8("ServerHello.legacy_session_id_echo", b, 0, 1)?;
-
-        let legacy_session_id: Vec<u8> = legacy_session_id_echo.to_vec();
+        let legacy_session_id: Vec<u8> = ctx.vec8("legacy_session_id", "opaque<0..32>", 0, 1)?;
 
         if legacy_session_id.len() > 32 {
-            log::error!("ServerHello.legacy_session_id length is greater than maximum of 32");
+            log::error!("{} length is greater than maximum of 32", ctx.prev_path());
             return Err(AlertDescription::DecodeError);
         }
 
-        let (b, cipher_suite) = parse::u16("ServerHello.cipher_suite", b)?;
+        let cipher_suite = ctx.u16("cipher_suite", "CipherSuite")?;
 
         let cipher_suite: CipherSuite = match CipherSuite::try_from(cipher_suite) {
             Ok(cs) => cs,
             Err(v) => {
-                log::error!("ServerHello.cipher_suite contains unknown value 0x{v:04X}");
+                log::error!("{} contains unknown value 0x{v:04X}", ctx.prev_path());
                 return Err(AlertDescription::IllegalParameter);
             }
         };
 
-        let (b, legacy_compression_method) = parse::u8("ServerHello.legacy_compression_method", b)?;
+        let legacy_compression_method = ctx.u8("legacy_compression_method", "uint8")?;
 
         if legacy_compression_method != 0 {
             log::error!(
-                "ServerHello.legacy_compression_method 0x{legacy_compression_method:02X} is not the required value of 0"
+                "{} 0x{legacy_compression_method:02X} is not the required value of 0",
+                ctx.prev_path()
             );
             return Err(AlertDescription::IllegalParameter);
         }
 
-        let (_, exts) = parse::vec16("ServerHello.extensions", b, 6, 1)?;
-
-        let (_, exts) = ServerHelloExtensions::deser(exts, retry_request)?;
+        ctx.begin_vec16("extensions", "Extension<6..2^16-1>", 6, 1)?;
+        let exts = ServerHelloExtensions::decode(ctx, retry_request)?;
+        ctx.end_vec()?;
 
         Ok(Self {
             random,

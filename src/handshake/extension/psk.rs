@@ -1,4 +1,4 @@
-use crate::{alert::AlertDescription, parse};
+use crate::{alert::AlertDescription, decode::DecodeContext};
 
 /// # References
 ///
@@ -17,19 +17,14 @@ pub(crate) struct PskIdentity {
 }
 
 impl PskIdentity {
-    pub fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let (b, identity): (_, &[u8]) = parse::vec16("PskIdentity identity", b, 1, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let identity = ctx.vec16("identity", "opaque<1..2^16-1>", 1, 1)?;
+        let obfuscated_ticket_age = ctx.u32("obfuscated_ticket_age", "uint32")?;
 
-        let (b, obfuscated_ticket_age): (_, u32) =
-            parse::u32("PskIdentity obfuscated_ticket_age", b)?;
-
-        Ok((
-            b,
-            Self {
-                identity: identity.to_vec(),
-                obfuscated_ticket_age,
-            },
-        ))
+        Ok(Self {
+            identity,
+            obfuscated_ticket_age,
+        })
     }
 
     pub fn ser(&self) -> Vec<u8> {
@@ -60,14 +55,10 @@ pub(crate) struct PskBinderEntry {
 }
 
 impl PskBinderEntry {
-    pub fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let (b, binder_entry) = parse::vec8("PskBinderEntry", b, 32, 1)?;
-        Ok((
-            b,
-            Self {
-                data: binder_entry.to_vec(),
-            },
-        ))
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let data = ctx.vec8("binder_entry", "opaque<32..255>", 32, 1)?;
+
+        Ok(Self { data })
     }
 
     pub fn ser(&self) -> Vec<u8> {
@@ -110,24 +101,34 @@ pub struct OfferedPsks {
 }
 
 impl OfferedPsks {
-    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (b, mut identities_b): (_, &[u8]) = parse::vec16("OfferedPsks identities", b, 7, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec16("identities", "PskIdentity<7..2^16-1>", 7, 1)?;
 
         let mut identities: Vec<PskIdentity> = Vec::new();
-        while !identities_b.is_empty() {
-            let (new_identities, identity) = PskIdentity::deser(identities_b)?;
-            identities_b = new_identities;
+        let mut index = 0;
+        while ctx.remaining() > 0 {
+            ctx.begin_element("identity", "PskIdentity", index);
+            let identity = PskIdentity::decode(ctx)?;
             identities.push(identity);
+            ctx.end_element();
+            index += 1;
         }
 
-        let (_, mut binders_b): (_, &[u8]) = parse::vec16("OfferedPsks binders", b, 33, 1)?;
+        ctx.end_vec()?;
 
-        let mut binders: Vec<PskBinderEntry> = Default::default();
-        while !binders_b.is_empty() {
-            let (new_binders, binder) = PskBinderEntry::deser(binders_b)?;
-            binders_b = new_binders;
+        ctx.begin_vec16("binders", "PskBinderEntry<33..2^16-1>", 33, 1)?;
+
+        let mut binders: Vec<PskBinderEntry> = Vec::new();
+        index = 0;
+        while ctx.remaining() > 0 {
+            ctx.begin_element("binder", "PskBinderEntry", index);
+            let binder = PskBinderEntry::decode(ctx)?;
             binders.push(binder);
+            ctx.end_element();
+            index += 1;
         }
+
+        ctx.end_vec()?;
 
         Ok(Self {
             identities,
@@ -223,14 +224,16 @@ pub(crate) struct PskKeyExchangeModes {
 }
 
 impl PskKeyExchangeModes {
-    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (_, b): (_, &[u8]) = parse::vec8("PskKeyExchangeModes ke_modes", b, 1, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec8("ke_modes", "PskKeyExchangeMode<1..255>", 1, 1)?;
 
-        let mut ke_modes: Vec<Result<PskKeyExchangeMode, u8>> = Vec::with_capacity(b.len());
-
-        for ke_mode in b {
-            ke_modes.push((*ke_mode).try_into())
+        let mut ke_modes: Vec<Result<PskKeyExchangeMode, u8>> = Vec::new();
+        while ctx.remaining() > 0 {
+            let ke_mode = ctx.u8("ke_mode", "PskKeyExchangeMode")?;
+            ke_modes.push(ke_mode.try_into());
         }
+
+        ctx.end_vec()?;
 
         Ok(Self { ke_modes })
     }

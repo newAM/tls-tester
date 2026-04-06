@@ -17,20 +17,20 @@ pub use record_size_limit::RecordSizeLimit;
 pub(crate) use server_name::ServerName;
 pub use server_name::ServerNameList;
 pub use signature_scheme::SignatureScheme;
-use signature_scheme::deser_signature_scheme_list;
+use signature_scheme::decode_signature_scheme_list;
 pub use supported_versions::SupportedVersionsClientHello;
 
 use crate::{
     alert::AlertDescription,
+    decode::DecodeContext,
     handshake::{
         ClientHello,
         ech::{ECHClientHello, OuterExtensions},
     },
-    parse,
     tls_version::TlsVersion,
 };
 
-use super::named_group::{NamedGroup, deser_named_group_list};
+use super::named_group::{NamedGroup, decode_named_group_list};
 
 /// Extension type.
 ///
@@ -179,11 +179,13 @@ pub(crate) struct ClientHelloExtensions {
 }
 
 impl ClientHelloExtensions {
-    pub fn deser<'a>(
-        mut b: &'a [u8],
+    // Assumes the caller has already called begin_vec16 for the extensions block
+    pub fn decode(
+        ctx: &mut DecodeContext,
         outer: Option<&ClientHello>,
-    ) -> Result<(&'a [u8], Self), AlertDescription> {
+    ) -> Result<Self, AlertDescription> {
         let mut extension_data: Vec<(Result<ExtensionType, u16>, Vec<u8>)> = Vec::new();
+        let mut extenstion_types: HashSet<Result<ExtensionType, u16>> = HashSet::new();
 
         let mut supported_versions: Option<SupportedVersionsClientHello> = None;
         let mut key_share: Option<KeyShareClientHello> = None;
@@ -197,20 +199,14 @@ impl ClientHelloExtensions {
         let mut signature_algorithms_cert: Option<Vec<SignatureScheme>> = None;
         let mut ech_outer_extensions: Option<OuterExtensions> = None;
 
-        let initial_len: usize = b.len();
+        let mut index = 0;
+        while ctx.remaining() > 0 {
+            ctx.begin_element("extension", "Extension", index);
 
-        while !b.is_empty() {
-            let (new_b, extension_type): (_, u16) =
-                parse::u16("ClientHello extensions extension_type", b)?;
-            b = new_b;
-            let extension_payload_idx = initial_len - b.len() + size_of::<u16>();
-            let (new_b, data): (_, &[u8]) =
-                parse::vec16("ClientHello extensions extension_data", b, 0, 1)?;
-            b = new_b;
+            let extension_type = ctx.u16("extension_type", "ExtensionType")?;
+            let extension_type_result = ExtensionType::try_from(extension_type);
 
-            let extension_type = ExtensionType::try_from(extension_type);
-
-            let extension_pretty: String = match extension_type {
+            let extension_pretty: String = match extension_type_result {
                 Ok(et) => format!("{et:?}"),
                 Err(val) => format!("0x{val:04x}"),
             };
@@ -218,68 +214,90 @@ impl ClientHelloExtensions {
             // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
             // There MUST NOT be more than one extension of the same type in a
             // given extension block.
-            let duplicate: bool = extension_data.iter().any(|(ty, _)| ty == &extension_type);
+            let duplicate: bool = !extenstion_types.insert(extension_type_result);
             if duplicate {
-                log::error!("< ClientHello Extension appeared more than once: {extension_pretty}");
-                return Err(AlertDescription::DecodeError)?;
+                log::error!("ClientHello extension appeared more than once: {extension_pretty}");
+                return Err(AlertDescription::DecodeError);
             }
-            extension_data.push((extension_type, data.into()));
 
-            match extension_type {
+            // Parse extension_data as a vec16 - this creates a nested vector context
+            ctx.begin_vec16("extension_data", "opaque<0..2^16-1>", 0, 1)?;
+
+            // Track the start and end positions for ECH
+            let extension_data_start = ctx.current_position();
+
+            match extension_type_result {
                 Ok(ExtensionType::ServerName) => {
-                    let server_name_list_deser: ServerNameList = ServerNameList::deser(data)?;
-                    log::debug!("< ClientHello ServerName {:?}", server_name_list_deser);
-                    server_name_list.replace(server_name_list_deser);
+                    let snl = ServerNameList::decode(ctx)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), snl);
+                    server_name_list.replace(snl);
                 }
                 Ok(ExtensionType::MaxFragmentLength) => {
                     log::warn!("Ignoring ClientHello extension MaxFragmentLength");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::StatusRequest) => {
                     log::warn!("Ignoring ClientHello extension StatusRequest");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::SupportedGroups) => {
-                    let supported_groups_deser = deser_named_group_list(data)?;
-                    log::debug!("< ClientHello SupportedGroups {supported_groups_deser:?}");
-                    supported_groups.replace(supported_groups_deser);
+                    let groups = decode_named_group_list(ctx)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), groups);
+                    supported_groups.replace(groups);
                 }
                 Ok(ExtensionType::SignatureAlgorithms) => {
-                    let signature_scheme_list: Vec<SignatureScheme> =
-                        deser_signature_scheme_list(data)?;
-                    log::debug!("< ClientHello SignatureAlgorithms {signature_scheme_list:?}");
-
-                    signature_algorithms.replace(signature_scheme_list);
+                    let sig_algs = decode_signature_scheme_list(ctx)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), sig_algs);
+                    signature_algorithms.replace(sig_algs);
                 }
                 Ok(ExtensionType::UseSrtp) => {
                     log::warn!("Ignoring ClientHello extension UseSrtp");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::Heartbeat) => {
                     log::warn!("Ignoring ClientHello extension Heartbeat");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::ApplicationLayerProtocolNegotiation) => {
                     log::warn!(
                         "Ignoring ClientHello extension ApplicationLayerProtocolNegotiation"
                     );
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::SignedCertificateTimestamp) => {
                     log::warn!("Ignoring ClientHello extension SignedCertificateTimestamp");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::ClientCertificateType) => {
                     log::warn!("Ignoring ClientHello extension ClientCertificateType");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::ServerCertificateType) => {
                     log::warn!("Ignoring ClientHello extension ServerCertificateType");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::Padding) => {
-                    log::debug!("< ClientHello padding length {}", data.len());
-                    let all_zero: bool = data.iter().all(|&x| x == 0);
+                    // Read the padding data to check it's all zeros
+                    let padding_len = ctx.remaining();
+                    log::debug!("< {} padding length {}", ctx.current_path(), padding_len);
+
+                    // We need to verify all bytes are zero
+                    let current_pos = ctx.current_position();
+                    let padding_data =
+                        &ctx.original_buffer()[current_pos..current_pos + padding_len];
+                    let all_zero: bool = padding_data.iter().all(|&x| x == 0);
                     if !all_zero {
                         log::error!("ClientHello Padding extension is non-zero");
                         return Err(AlertDescription::IllegalParameter);
                     }
+                    // Consume the padding bytes
+                    for _ in 0..padding_len {
+                        ctx.u8("padding", "uint8")?;
+                    }
                 }
                 Ok(ExtensionType::RecordSizeLimit) => {
-                    let rsl: RecordSizeLimit = RecordSizeLimit::deser(data)?;
-                    log::debug!("< ClientHello RecordSizeLimit {rsl:?}");
+                    let rsl = RecordSizeLimit::decode(ctx)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), rsl);
                     record_size_limit.replace(rsl);
                 }
                 Ok(ExtensionType::PreSharedKey) => {
@@ -289,25 +307,20 @@ impl ClientHelloExtensions {
                     // "pre_shared_key" (Section 4.2.11) which MUST be the last extension in
                     // the ClientHello (but can appear anywhere in the ServerHello
                     // extensions block).
-                    if !b.is_empty() {
-                        log::error!("ClientHello PreSharedKey is not the last extension");
-                        return Err(AlertDescription::UnexpectedMessage);
-                    }
+                    // We'll check this after consuming the extension data
 
-                    let offered_psks: OfferedPsks = OfferedPsks::deser(data)?;
-
-                    log::debug!("< ClientHello PreSharedKey {offered_psks:02X?}");
-
+                    let offered_psks = OfferedPsks::decode(ctx)?;
+                    log::debug!("< {} {:02X?}", ctx.prev_path(), offered_psks);
                     pre_shared_key.replace(offered_psks);
                 }
                 Ok(ExtensionType::EarlyData) => {
                     log::warn!("Ignoring ClientHello extension EarlyData");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::SupportedVersions) => {
-                    let supported_versions_deser: SupportedVersionsClientHello =
-                        SupportedVersionsClientHello::deser(data)?;
-                    log::debug!("< ClientHello supported_versions {supported_versions_deser:04x?}");
-                    supported_versions.replace(supported_versions_deser);
+                    let sv = SupportedVersionsClientHello::decode(ctx)?;
+                    log::debug!("< {} {:04x?}", ctx.prev_path(), sv);
+                    supported_versions.replace(sv);
                 }
                 Ok(ExtensionType::Cookie) => {
                     log::error!(
@@ -316,44 +329,46 @@ impl ClientHelloExtensions {
                     return Err(AlertDescription::UnsupportedExtension);
                 }
                 Ok(ExtensionType::PskKeyExchangeModes) => {
-                    let psk_key_exchange_modes_deser: PskKeyExchangeModes =
-                        PskKeyExchangeModes::deser(data)?;
-                    log::debug!(
-                        "< ClientHello PskKeyExchangeModes {psk_key_exchange_modes_deser:?}"
-                    );
-                    psk_key_exchange_modes.replace(psk_key_exchange_modes_deser);
+                    let modes = PskKeyExchangeModes::decode(ctx)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), modes);
+                    psk_key_exchange_modes.replace(modes);
                 }
                 Ok(ExtensionType::CertificateAuthorities) => {
                     log::warn!("Ignoring ClientHello extension CertificateAuthorities");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::OidFilters) => {
                     log::warn!("Ignoring ClientHello extension OidFilters");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::PostHandshakeAuth) => {
                     log::warn!("Ignoring ClientHello extension PostHandshakeAuth");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::SignatureAlgorithmsCert) => {
-                    let signature_scheme_list: Vec<SignatureScheme> =
-                        deser_signature_scheme_list(data)?;
-                    log::debug!("< ClientHello SignatureAlgorithmsCert {signature_scheme_list:?}");
-                    signature_algorithms_cert.replace(signature_scheme_list);
+                    let sig_algs = decode_signature_scheme_list(ctx)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), sig_algs);
+                    signature_algorithms_cert.replace(sig_algs);
                 }
                 Ok(ExtensionType::KeyShare) => {
-                    let key_share_ch: KeyShareClientHello = KeyShareClientHello::deser(data)?;
-                    log::debug!("< ClientHello KeyShare {key_share_ch:?}");
-                    key_share.replace(key_share_ch);
+                    let ks = KeyShareClientHello::decode(ctx)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), ks);
+                    key_share.replace(ks);
                 }
                 Ok(ExtensionType::EncryptedClientHello) => {
-                    let ech_start_idx: usize = extension_payload_idx;
-                    let ech_end_idx: usize = ech_start_idx + data.len();
-                    let ech_client_hello: ECHClientHello = ECHClientHello::deser(data)?;
-                    log::debug!("< ClientHello EncryptedClientHello {ech_client_hello:02x?}");
-                    encrypted_client_hello.replace((ech_client_hello, ech_start_idx, ech_end_idx));
+                    let ech_client_hello = ECHClientHello::decode(ctx)?;
+                    let ech_end_idx = ctx.current_position();
+                    log::debug!("< {} {:02x?}", ctx.prev_path(), ech_client_hello);
+                    encrypted_client_hello.replace((
+                        ech_client_hello,
+                        extension_data_start,
+                        ech_end_idx,
+                    ));
                 }
                 Ok(ExtensionType::EchOuterExtensions) => {
-                    let ech_outer_extensions_deser: OuterExtensions = OuterExtensions::deser(data)?;
-                    log::debug!("< ClientHello OuterExtensions {ech_outer_extensions_deser:02x?}");
-                    ech_outer_extensions.replace(ech_outer_extensions_deser);
+                    let outer_ext = OuterExtensions::decode(ctx)?;
+                    log::debug!("< {} {:02x?}", ctx.prev_path(), outer_ext);
+                    ech_outer_extensions.replace(outer_ext);
                 }
                 Err(val) => {
                     // https://datatracker.ietf.org/doc/html/rfc8446#section-9.3
@@ -363,8 +378,25 @@ impl ClientHelloExtensions {
                     // TLS 1.3, a client receiving a CertificateRequest or
                     // NewSessionTicket MUST also ignore all unrecognized extensions.
                     log::warn!("Ignoring unknown ClientHello extension 0x{val:04X}");
+                    ctx.skip_remaining();
                 }
             }
+
+            // Store the extension data (raw bytes) for later use
+            let extension_data_end = ctx.current_position();
+            let data = ctx.original_buffer()[extension_data_start..extension_data_end].to_vec();
+            extension_data.push((extension_type_result, data));
+
+            // Check if PreSharedKey is the last extension
+            if extension_type_result == Ok(ExtensionType::PreSharedKey) && ctx.remaining() > 0 {
+                log::error!("ClientHello PreSharedKey is not the last extension");
+                return Err(AlertDescription::UnexpectedMessage);
+            }
+
+            // Verify extension_data was fully consumed
+            ctx.end_vec()?;
+            ctx.end_element();
+            index += 1;
         }
 
         if let Some(outer) = outer
@@ -407,11 +439,10 @@ impl ClientHelloExtensions {
                 .contains(&Ok(ExtensionType::KeyShare))
                 && key_share.replace(outer.exts.key_share.clone()).is_some()
             {
-                todo!("handle duplicat key share extensio")
+                todo!("handle duplicate key share extension")
             }
         }
 
-        // TODO: why does this exist?
         if signature_algorithms_cert.is_none() {
             // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2.3
             // If no "signature_algorithms_cert" extension is
@@ -524,7 +555,7 @@ impl ClientHelloExtensions {
 
         // TODO: if outer exists then check ECH extension exists and is value inner
 
-        let exts: ClientHelloExtensions = ClientHelloExtensions {
+        Ok(Self {
             extension_data,
             supported_versions,
             key_share,
@@ -537,9 +568,7 @@ impl ClientHelloExtensions {
             record_size_limit,
             encrypted_client_hello,
             ech_outer_extensions,
-        };
-
-        Ok((b, exts))
+        })
     }
 }
 
@@ -620,24 +649,22 @@ pub struct ServerHelloExtensions {
 }
 
 impl ServerHelloExtensions {
-    pub fn deser(mut b: &[u8], retry_request: bool) -> Result<(&[u8], Self), AlertDescription> {
+    // Assumes the caller has already called begin_vec16 for the extensions block
+    pub fn decode(ctx: &mut DecodeContext, retry_request: bool) -> Result<Self, AlertDescription> {
         let mut extenstion_types: HashSet<Result<ExtensionType, u16>> = HashSet::new();
 
         let mut supported_versions: Option<u16> = None;
         let mut key_share: Option<KeyShareServerHello> = None;
         let mut psk_selected_identity: Option<u16> = None;
 
-        while !b.is_empty() {
-            let (new_b, extension_type): (_, u16) =
-                parse::u16("ServerHello extensions extension_type", b)?;
-            b = new_b;
-            let (new_b, data): (_, &[u8]) =
-                parse::vec16("ServerHello extensions extension_data", b, 0, 1)?;
-            b = new_b;
+        let mut index = 0;
+        while ctx.remaining() > 0 {
+            ctx.begin_element("extension", "Extension", index);
 
-            let extension_type = ExtensionType::try_from(extension_type);
+            let extension_type = ctx.u16("extension_type", "ExtensionType")?;
+            let extension_type_result = ExtensionType::try_from(extension_type);
 
-            let extension_pretty: String = match extension_type {
+            let extension_pretty: String = match extension_type_result {
                 Ok(et) => format!("{et:?}"),
                 Err(val) => format!("{val}"),
             };
@@ -645,13 +672,16 @@ impl ServerHelloExtensions {
             // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
             // There MUST NOT be more than one extension of the same type in a
             // given extension block.
-            let duplicate: bool = !extenstion_types.insert(extension_type);
+            let duplicate: bool = !extenstion_types.insert(extension_type_result);
             if duplicate {
-                log::error!("ServerHello Extension appeared more than once: {extension_pretty}");
-                return Err(AlertDescription::DecodeError)?;
+                log::error!("ServerHello extension appeared more than once: {extension_pretty}");
+                return Err(AlertDescription::DecodeError);
             }
 
-            match extension_type {
+            // Parse extension_data as a vec16 - this creates a nested vector context
+            ctx.begin_vec16("extension_data", "opaque<0..2^16-1>", 0, 1)?;
+
+            match extension_type_result {
                 Ok(
                     ExtensionType::ServerName
                     | ExtensionType::MaxFragmentLength
@@ -681,56 +711,40 @@ impl ServerHelloExtensions {
                     // which it recognizes and which is not specified for the message in
                     // which it appears, it MUST abort the handshake with an
                     // "illegal_parameter" alert.
-                    log::error!("ServerHello extension {extension_pretty} is not specified");
+                    log::error!(
+                        "{} extension is not specified for ServerHello",
+                        ctx.current_path()
+                    );
                     return Err(AlertDescription::IllegalParameter);
                 }
                 Ok(ExtensionType::PreSharedKey) => {
-                    let (remain, selected_identity) = parse::u16(
-                        "ServerHello.extensions.pre_shared_key.selected_identity",
-                        data,
-                    )?;
+                    let selected_identity = ctx.u16("selected_identity", "u16")?;
 
-                    log::debug!(
-                        "< ServerHello PreSharedKey selected_identity 0x{selected_identity:04x?}"
-                    );
-
-                    if !remain.is_empty() {
-                        log::error!(
-                            "ServerHello.extensions.pre_shared_key.selected_identity contains {} bytes extra data",
-                            remain.len()
-                        );
-                        return Err(AlertDescription::DecodeError);
-                    }
+                    log::debug!("< {} 0x{:04x?}", ctx.prev_path(), selected_identity);
 
                     psk_selected_identity.replace(selected_identity);
                 }
                 Ok(ExtensionType::SupportedVersions) => {
-                    let data_sized: [u8; 2] = match data.try_into() {
-                        Ok(ds) => ds,
-                        Err(_) => {
-                            log::error!(
-                                "ServerHello extension SupportedVersions length is {} expected 2",
-                                data.len()
-                            );
-                            return Err(AlertDescription::DecodeError);
-                        }
-                    };
+                    let data: u16 = ctx.u16("selected_version", "ProtocolVersion")?;
 
-                    let data_u16: u16 = u16::from_be_bytes(data_sized);
+                    log::debug!("< {} 0x{:04X}", ctx.prev_path(), data);
 
-                    log::debug!("< ServerHello supported_versions 0x{data_u16:04X}");
-
-                    supported_versions.replace(data_u16);
+                    supported_versions.replace(data);
                 }
                 Ok(ExtensionType::KeyShare) => {
-                    let (_, key_share_sh) = KeyShareServerHello::deser(data, retry_request)?;
-                    log::debug!("< ServerHello KeyShare {key_share_sh:?}");
+                    let key_share_sh = KeyShareServerHello::decode(ctx, retry_request)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), key_share_sh);
                     key_share.replace(key_share_sh);
                 }
                 Err(val) => {
-                    log::warn!("Ignoring unknown ServerHello extension 0x{val:04X}");
+                    log::warn!("Ignoring unknown ServerHello extension 0x{:04X}", val);
                 }
             }
+
+            // Verify extension_data was fully consumed
+            ctx.end_vec()?;
+            ctx.end_element();
+            index += 1;
         }
 
         let supported_versions: u16 = match supported_versions {
@@ -749,13 +763,11 @@ impl ServerHelloExtensions {
             }
         };
 
-        let exts: Self = Self {
+        Ok(Self {
             psk_selected_identity,
             supported_versions,
             key_share,
-        };
-
-        Ok((b, exts))
+        })
     }
 }
 
@@ -777,39 +789,38 @@ pub(crate) struct EncryptedExtensions {
 }
 
 impl EncryptedExtensions {
-    pub fn deser(mut b: &[u8]) -> Result<Self, AlertDescription> {
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec16("extensions", "Extension<0..2^16-1>", 0, 1)?;
+
         let mut extenstion_types: HashSet<Result<ExtensionType, u16>> = HashSet::new();
 
         let mut server_name_list: Option<ServerNameList> = None;
         let mut supported_groups: Option<Vec<NamedGroup>> = None;
 
-        while !b.is_empty() {
-            let (new_b, extension_type): (_, u16) =
-                parse::u16("EncryptedExtensions extension_type", b)?;
-            b = new_b;
-            let (new_b, data): (_, &[u8]) =
-                parse::vec16("EncryptedExtensions extension_data", b, 0, 1)?;
-            b = new_b;
+        let mut index = 0;
+        while ctx.remaining() > 0 {
+            ctx.begin_element("extension", "Extension", index);
 
-            let extension_type = ExtensionType::try_from(extension_type);
+            let extension_type = ctx.u16("extension_type", "ExtensionType")?;
+            let extension_type_result = ExtensionType::try_from(extension_type);
 
-            let extension_pretty: String = match extension_type {
+            let extension_pretty: String = match extension_type_result {
                 Ok(et) => format!("{et:?}"),
-                Err(val) => format!("{val}"),
+                Err(val) => format!("0x{val:04x}"),
             };
 
             // https://datatracker.ietf.org/doc/html/rfc8446#section-4.2
             // There MUST NOT be more than one extension of the same type in a
             // given extension block.
-            let duplicate: bool = !extenstion_types.insert(extension_type);
+            let duplicate: bool = !extenstion_types.insert(extension_type_result);
             if duplicate {
                 log::error!(
                     "< EncryptedExtensions extension appeared more than once: {extension_pretty}"
                 );
-                return Err(AlertDescription::DecodeError)?;
+                return Err(AlertDescription::DecodeError);
             }
 
-            if let Ok(et) = extension_type
+            if let Ok(et) = extension_type_result
                 && !et.may_appear_in_ee()
             {
                 log::error!(
@@ -818,50 +829,59 @@ impl EncryptedExtensions {
                 return Err(AlertDescription::IllegalParameter)?;
             }
 
-            match extension_type {
+            ctx.begin_vec16("extension_data", "opaque<0..2^16-1>", 0, 1)?;
+
+            match extension_type_result {
                 Ok(ExtensionType::ServerName) => {
-                    let server_name_list_deser: ServerNameList = ServerNameList::deser(data)?;
-                    log::debug!(
-                        "< EncryptedExtensions ServerName {:?}",
-                        server_name_list_deser
-                    );
-                    server_name_list.replace(server_name_list_deser);
+                    if ctx.remaining() > 0 {
+                        let snl = ServerNameList::decode(ctx)?;
+                        log::debug!("< {} {:?}", ctx.prev_path(), snl);
+                        server_name_list.replace(snl);
+                    }
                 }
                 Ok(ExtensionType::MaxFragmentLength) => {
                     log::warn!("Ignoring EncryptedExtensions extension MaxFragmentLength");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::StatusRequest) => unreachable!(),
                 Ok(ExtensionType::SupportedGroups) => {
-                    let supported_groups_deser: Vec<NamedGroup> = deser_named_group_list(data)?;
-                    log::debug!("< EncryptedExtensions SupportedGroups {supported_groups_deser:?}");
-                    supported_groups.replace(supported_groups_deser);
+                    let groups = decode_named_group_list(ctx)?;
+                    log::debug!("< {} {:?}", ctx.prev_path(), groups);
+                    supported_groups.replace(groups);
                 }
                 Ok(ExtensionType::SignatureAlgorithms) => unreachable!(),
                 Ok(ExtensionType::UseSrtp) => {
                     log::warn!("Ignoring EncryptedExtensions extension UseSrtp");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::Heartbeat) => {
                     log::warn!("Ignoring EncryptedExtensions extension Heartbeat");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::ApplicationLayerProtocolNegotiation) => {
                     log::warn!(
                         "Ignoring EncryptedExtensions extension ApplicationLayerProtocolNegotiation"
                     );
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::SignedCertificateTimestamp) => {
                     log::warn!("Ignoring EncryptedExtensions extension SignedCertificateTimestamp");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::ClientCertificateType) => {
                     log::warn!("Ignoring EncryptedExtensions extension ClientCertificateType");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::ServerCertificateType) => {
                     log::warn!("Ignoring EncryptedExtensions extension ServerCertificateType");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::Padding) => unreachable!(),
                 Ok(ExtensionType::RecordSizeLimit) => unreachable!(),
                 Ok(ExtensionType::PreSharedKey) => unreachable!(),
                 Ok(ExtensionType::EarlyData) => {
-                    log::warn!("Ignoring ClientHello extension EarlyData");
+                    log::warn!("Ignoring EncryptedExtensions extension EarlyData");
+                    ctx.skip_remaining();
                 }
                 Ok(ExtensionType::SupportedVersions) => unreachable!(),
                 Ok(ExtensionType::Cookie) => unreachable!(),
@@ -874,18 +894,17 @@ impl EncryptedExtensions {
                 Ok(ExtensionType::EncryptedClientHello) => unreachable!(),
                 Ok(ExtensionType::EchOuterExtensions) => unreachable!(),
                 Err(val) => {
-                    log::warn!("Ignoring unknown EncryptedExension extension 0x{val:04X}");
+                    log::warn!("Ignoring unknown EncryptedExtension extension 0x{val:04X}");
+                    ctx.skip_remaining();
                 }
             }
+
+            ctx.end_vec()?;
+            ctx.end_element();
+            index += 1;
         }
 
-        if !b.is_empty() {
-            log::error!(
-                "EncryptedExtensions contains {} bytes of extra data",
-                b.len()
-            );
-            return Err(AlertDescription::DecodeError);
-        }
+        ctx.end_vec()?;
 
         let exts: EncryptedExtensions = EncryptedExtensions {
             server_name_list,

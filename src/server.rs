@@ -1,10 +1,4 @@
-use std::{
-    collections::VecDeque,
-    fs,
-    io::{self},
-    net::TcpStream,
-    path::PathBuf,
-};
+use std::{fs, io, net::TcpStream, path::PathBuf};
 
 use crate::{
     ECHConfigList, Psk,
@@ -12,6 +6,7 @@ use crate::{
     base::{TlsState, TlsStream},
     cipher_suite::CipherSuite,
     crypto::hpke::{self, Context, setup_base_r},
+    decode::DecodeContext,
     error::TlsError,
     handshake::{
         self, CertificateVerify, ClientHello, HandshakeHeader, HandshakeType, KeyShareEntry,
@@ -235,7 +230,8 @@ impl TlsServerBuilder {
             key_schedule: KeySchedule::new_server(),
             state: TlsState::WaitClientHello,
             psks: self.psks,
-            buf: VecDeque::new(),
+            buf: Vec::new(),
+            buf_pos: 0,
             record_size_limit: self.record_size_limit,
             supported_named_groups: self.supported_named_groups,
             supported_signature_algorithms: self.supported_signature_algorithms,
@@ -268,7 +264,8 @@ impl TlsServerStream {
     }
 
     fn read_client_hello(&mut self) -> Result<ClientHello, TlsError> {
-        let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
+        let mut ctx: DecodeContext = self.base.next_handshake("ClientHello")?;
+        let hs_hdr: HandshakeHeader = HandshakeHeader::decode(&mut ctx)?;
 
         if hs_hdr.msg_type() != HandshakeType::ClientHello {
             log::error!(
@@ -279,14 +276,7 @@ impl TlsServerStream {
             return Err(AlertDescription::UnexpectedMessage)?;
         }
 
-        let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
-
-        if !self.base.buf.is_empty() {
-            log::error!("Received fragmented records across key changes");
-            return Err(AlertDescription::DecodeError)?;
-        }
-
-        let client_hello: ClientHello = ClientHello::deser(&data, None)?;
+        let client_hello: ClientHello = ClientHello::decode(&mut ctx, None)?;
 
         Ok(client_hello)
     }
@@ -389,8 +379,9 @@ impl TlsServerStream {
 
                         log::info!("ECH tag ok");
 
+                        let mut ctx = DecodeContext::new("ClientHelloInner", payload_decrypted);
                         let inner_client_hello: ClientHello =
-                            ClientHello::deser(&payload_decrypted, Some(client_hello))?;
+                            ClientHello::decode(&mut ctx, Some(client_hello))?;
 
                         log::warn!("TODO: ignoring client hello inner: {inner_client_hello:02x?}");
 
@@ -438,7 +429,7 @@ impl TlsServerStream {
                 return Err(AlertDescription::UnknownPskIdentity)?;
             }
         } else {
-            // validated to exist in ClientHelloExtensions::deser
+            // validated to exist in ClientHelloExtensions::decode
             let signature_algorithms = client_hello.exts.signature_algorithms.as_ref().unwrap();
 
             // Find the first algorithm that the client lists that is also supported by the server
@@ -483,7 +474,7 @@ impl TlsServerStream {
 
         let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
 
-        if !self.base.buf.is_empty() {
+        if !self.base.buf_is_empty() {
             log::error!("Received fragmented records across key changes");
             return Err(AlertDescription::DecodeError)?;
         }
@@ -624,7 +615,7 @@ impl TlsServerStream {
 
         self.base.key_schedule.initialize_early_secret();
 
-        if !self.base.buf.is_empty() {
+        if !self.base.buf_is_empty() {
             log::error!("Client fragmented record across key changes");
             return Err(AlertDescription::DecodeError)?;
         }
@@ -648,7 +639,7 @@ impl TlsServerStream {
 
         self.base.key_schedule.initialize_handshake_secret();
 
-        if !self.base.buf.is_empty() {
+        if !self.base.buf_is_empty() {
             log::error!("Client fragmented record across key changes");
             return Err(AlertDescription::DecodeError)?;
         }
@@ -708,7 +699,7 @@ impl TlsServerStream {
 
         self.base.key_schedule.initialize_master_secret();
 
-        if !self.base.buf.is_empty() {
+        if !self.base.buf_is_empty() {
             log::error!("Client fragmented record across key changes");
             return Err(AlertDescription::DecodeError)?;
         }
@@ -723,7 +714,7 @@ impl std::io::Read for TlsServerStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         assert_eq!(self.base.state, TlsState::Connected);
 
-        while self.base.buf.is_empty() {
+        while self.base.buf_is_empty() {
             self.base
                 .read_next_record()
                 .map_err(std::io::Error::other)?
@@ -731,7 +722,7 @@ impl std::io::Read for TlsServerStream {
 
         let mut len: usize = 0;
         for byte in buf.iter_mut() {
-            match self.base.buf.pop_front() {
+            match self.base.pop_front_byte() {
                 Some(b) => {
                     *byte = b;
                     len += 1;

@@ -1,4 +1,4 @@
-use crate::alert::AlertDescription;
+use crate::{alert::AlertDescription, decode::DecodeContext};
 
 /// # Reference
 ///
@@ -14,23 +14,13 @@ impl RecordSizeLimit {
     // TLS 1.3 uses a limit of 2^14+1 octets
     pub const LIMIT_MAX: u16 = (1 << 14) + 1;
 
-    pub fn deser(data: &[u8]) -> Result<Self, AlertDescription> {
-        let data_sized: [u8; 2] = match data.try_into() {
-            Ok(d) => d,
-            Err(_) => {
-                log::error!(
-                    "RecordSizeLimit size {} does not match expected of 2",
-                    data.len()
-                );
-                return Err(AlertDescription::DecodeError);
-            }
-        };
-
-        let limit: u16 = u16::from_be_bytes(data_sized);
+    pub(crate) fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let limit = ctx.u16("record_size_limit", "uint16")?;
 
         if limit > Self::LIMIT_MAX {
             log::error!(
-                "RecordSizeLimit of {limit} is greater than TLS v1.3 maximum of {}",
+                "{} of {limit} is greater than TLS v1.3 maximum of {}",
+                ctx.current_path(),
                 Self::LIMIT_MAX
             );
             return Err(AlertDescription::IllegalParameter);
@@ -41,7 +31,10 @@ impl RecordSizeLimit {
         // as a fatal error and generate an "illegal_parameter" alert.
         const LIMIT_MIN: u16 = 64;
         if limit < LIMIT_MIN {
-            log::error!("RecordSizeLimit of {limit} is less than minimum of {LIMIT_MIN}");
+            log::error!(
+                "{} of {limit} is less than minimum of {LIMIT_MIN}",
+                ctx.current_path()
+            );
             return Err(AlertDescription::IllegalParameter);
         }
 

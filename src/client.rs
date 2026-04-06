@@ -1,10 +1,11 @@
-use std::{collections::VecDeque, fs, io, net::TcpStream};
+use std::{fs, io, net::TcpStream};
 
 use crate::{
     AlertDescription, ECHConfigList, Psk,
     base::{self, TlsState, TlsStream},
     cipher_suite::CipherSuite,
     crypto::hpke::{AeadId, KdfId},
+    decode::DecodeContext,
     error::TlsError,
     handshake::{
         self, Certificate, CertificateEntry, CertificateVerify, ClientHello, ClientHelloBuilder,
@@ -13,7 +14,6 @@ use crate::{
         extension::{self, EncryptedExtensions, ServerName, signature_scheme::SignatureScheme},
     },
     key_schedule::KeySchedule,
-    parse,
     record::{self, ContentType},
     tls_version::TlsVersion,
 };
@@ -155,9 +155,10 @@ impl TlsClientBuilder {
 
             n = n.saturating_add(1);
 
-            let parsed_cert = match crate::x509::Certificate::deser(cert.contents(), true) {
-                Some((_, c)) => c,
-                None => {
+            let mut ctx = DecodeContext::new("Certificate", cert.contents().to_vec());
+            let parsed_cert = match crate::x509::Certificate::decode(&mut ctx, true) {
+                Ok((_, c)) => c,
+                Err(_) => {
                     log::error!("Failed to parse x509 certificate");
                     continue;
                 }
@@ -186,7 +187,8 @@ impl TlsClientBuilder {
             key_schedule: KeySchedule::new_client(),
             state: TlsState::WaitServerHello,
             psks,
-            buf: VecDeque::new(),
+            buf: Vec::new(),
+            buf_pos: 0,
             record_size_limit: self.record_size_limit,
             supported_named_groups: self.supported_named_groups,
             supported_signature_algorithms: self.supported_signature_algorithms,
@@ -221,7 +223,8 @@ impl TlsClientStream {
         &mut self,
         mut transcript_hash_ech: sha2::Sha256,
     ) -> Result<(Vec<u8>, ServerHello, Vec<u8>), TlsError> {
-        let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
+        let mut ctx: DecodeContext = self.base.next_handshake("ServerHello")?;
+        let hs_hdr: HandshakeHeader = HandshakeHeader::decode(&mut ctx)?;
 
         if hs_hdr.msg_type() != HandshakeType::ServerHello {
             log::error!(
@@ -232,22 +235,24 @@ impl TlsClientStream {
             return Err(AlertDescription::UnexpectedMessage)?;
         }
 
-        let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
+        let server_hello: ServerHello = ServerHello::decode(&mut ctx)?;
 
-        let server_hello: ServerHello = ServerHello::deser(&data)?;
-
+        // handshake header: 4 bytes
         // tls version: 2 bytes
         // random: 32 bytes
-        const RANDOM_LAST_8_BYTES_IDX: usize = 2 + 32 - 8;
+        const RANDOM_LAST_8_BYTES_IDX: usize = 4 + 2 + 32 - 8;
 
-        let mut data_transcript_hash_ech = data.clone();
+        let mut data_transcript_hash_ech = ctx.original_buffer().to_vec();
         data_transcript_hash_ech[RANDOM_LAST_8_BYTES_IDX..RANDOM_LAST_8_BYTES_IDX + 8].fill(0);
 
-        transcript_hash_ech.update(hs_hdr.to_be_bytes());
         transcript_hash_ech.update(&data_transcript_hash_ech);
         let transcript_ech_conf: Vec<u8> = transcript_hash_ech.finalize().to_vec();
 
-        Ok((data, server_hello, transcript_ech_conf))
+        Ok((
+            ctx.original_buffer().to_vec(),
+            server_hello,
+            transcript_ech_conf,
+        ))
     }
 
     fn handle_server_hello(
@@ -288,10 +293,7 @@ impl TlsClientStream {
                     HandshakeType::MessageHash,
                     hash_client_hello1,
                 ));
-                new_transcript_hash.update(HandshakeHeader::prepend_header(
-                    HandshakeType::ServerHello,
-                    server_hello_data,
-                ));
+                new_transcript_hash.update(server_hello_data);
                 self.base
                     .key_schedule
                     .set_transcript_hash(new_transcript_hash);
@@ -381,7 +383,8 @@ impl TlsClientStream {
     }
 
     fn read_encrypted_extensions(&mut self) -> Result<(), TlsError> {
-        let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
+        let mut ctx: DecodeContext = self.base.next_handshake("EncryptedExtensions")?;
+        let hs_hdr: HandshakeHeader = HandshakeHeader::decode(&mut ctx)?;
 
         if hs_hdr.msg_type() != HandshakeType::EncryptedExtensions {
             log::error!(
@@ -392,19 +395,7 @@ impl TlsClientStream {
             return Err(AlertDescription::UnexpectedMessage)?;
         }
 
-        let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
-
-        let (remain, ee) = parse::vec16("EncryptedExtensions", &data, 0, 1)?;
-
-        if !remain.is_empty() {
-            log::error!(
-                "EncryptedExtensions contains {} bytes of extra data",
-                remain.len()
-            );
-            return Err(AlertDescription::DecodeError)?;
-        }
-
-        let encrypted_extensions: EncryptedExtensions = EncryptedExtensions::deser(ee)?;
+        let encrypted_extensions: EncryptedExtensions = EncryptedExtensions::decode(&mut ctx)?;
 
         log::error!(
             "TODO: Client handling of server encrypted extensions unimplemented {encrypted_extensions:?}"
@@ -414,7 +405,8 @@ impl TlsClientStream {
     }
 
     fn read_certificate(&mut self) -> Result<Certificate, TlsError> {
-        let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
+        let mut ctx: DecodeContext = self.base.next_handshake("EncryptedExtensions")?;
+        let hs_hdr: HandshakeHeader = HandshakeHeader::decode(&mut ctx)?;
 
         if hs_hdr.msg_type() != HandshakeType::Certificate {
             log::error!(
@@ -425,11 +417,9 @@ impl TlsClientStream {
             return Err(AlertDescription::UnexpectedMessage)?;
         }
 
-        let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
-
         self.base.set_state(TlsState::WaitCertificateVerify);
 
-        Ok(Certificate::deser(&data)?)
+        Ok(Certificate::decode(&mut ctx)?)
     }
 
     fn handle_certificate(&mut self, certificate: &Certificate) -> Result<(), TlsError> {
@@ -506,7 +496,8 @@ impl TlsClientStream {
     }
 
     fn read_certificate_verify(&mut self) -> Result<CertificateVerify, TlsError> {
-        let hs_hdr: HandshakeHeader = self.base.next_handshake_header()?;
+        let mut ctx: DecodeContext = self.base.next_handshake("CertificateVerify")?;
+        let hs_hdr: HandshakeHeader = HandshakeHeader::decode(&mut ctx)?;
 
         if hs_hdr.msg_type() != HandshakeType::CertificateVerify {
             log::error!(
@@ -517,11 +508,9 @@ impl TlsClientStream {
             return Err(AlertDescription::UnexpectedMessage)?;
         }
 
-        let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
-
         self.base.set_state(TlsState::WaitServerFinished);
 
-        Ok(CertificateVerify::deser(&data)?)
+        Ok(CertificateVerify::decode(&mut ctx)?)
     }
 
     fn handle_certificate_verify(
@@ -596,7 +585,7 @@ impl TlsClientStream {
 
         let data: Vec<u8> = self.base.next_handshake_data(hs_hdr)?;
 
-        if !self.base.buf.is_empty() {
+        if !self.base.buf_is_empty() {
             log::error!("Server fragmented records across key changes");
             return Err(AlertDescription::DecodeError)?;
         }
@@ -675,11 +664,13 @@ impl TlsClientStream {
         // Handle ECH transcript if configured
         let mut transcript_hash_ech: sha2::Sha256 = sha2::Sha256::new();
         if !inner_data.is_empty() {
-            // TODO: this is very hacky to deser my own thing
+            // TODO: this is very hacky to decode the ClientHello I constructed
+            let mut ctx_outer = DecodeContext::new("ClientHelloOuter", ch_data[4..].to_vec());
             let client_hello_outer: ClientHello =
-                ClientHello::deser(&ch_data[4..], None).expect("TODO");
+                ClientHello::decode(&mut ctx_outer, None).expect("TODO");
+            let mut ctx_inner = DecodeContext::new("ClientHelloInner", inner_data.clone());
             let client_hello_inner: ClientHello =
-                ClientHello::deser(&inner_data, Some(&client_hello_outer)).expect("TODO");
+                ClientHello::decode(&mut ctx_inner, Some(&client_hello_outer)).expect("TODO");
 
             let transcript_hash_ech_data: Vec<u8> =
                 client_hello_outer.ech_transcript_data(&client_hello_inner);
@@ -708,7 +699,7 @@ impl TlsClientStream {
             )?
         };
 
-        if !self.base.buf.is_empty() {
+        if !self.base.buf_is_empty() {
             log::error!("Server fragmented record across key changes");
             return Err(AlertDescription::DecodeError)?;
         }
@@ -732,7 +723,7 @@ impl TlsClientStream {
 
         self.base.key_schedule.initialize_master_secret();
 
-        if !self.base.buf.is_empty() {
+        if !self.base.buf_is_empty() {
             log::error!("Server fragmented record across key changes");
             return Err(AlertDescription::DecodeError)?;
         }
@@ -763,7 +754,7 @@ impl io::Read for TlsClientStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         assert_eq!(self.base.state, TlsState::Connected);
 
-        while self.base.buf.is_empty() {
+        while self.base.buf_is_empty() {
             self.base
                 .read_next_record()
                 .map_err(std::io::Error::other)?
@@ -771,7 +762,7 @@ impl io::Read for TlsClientStream {
 
         let mut len: usize = 0;
         for byte in buf.iter_mut() {
-            match self.base.buf.pop_front() {
+            match self.base.pop_front_byte() {
                 Some(b) => {
                     *byte = b;
                     len += 1;

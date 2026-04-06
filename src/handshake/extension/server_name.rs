@@ -1,4 +1,4 @@
-use crate::{alert::AlertDescription, parse};
+use crate::{alert::AlertDescription, decode::DecodeContext};
 
 /// ServerName extension.
 ///
@@ -30,27 +30,22 @@ pub struct ServerNameList {
 }
 
 impl ServerNameList {
-    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        // TODO: tls-ech.dev has spec-violating zero-length server name lists with ECH
-        if b.is_empty() {
-            Ok(Self {
-                server_name_list: Vec::new(),
-            })
-        } else {
-            let (_, mut b) = parse::vec16("ServerNameList", b, 1, 1)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec16("server_name_list", "ServerName<1..2^16-1>", 1, 1)?;
 
-            let mut ret: Vec<ServerName> = Vec::new();
-
-            while !b.is_empty() {
-                let (b_new, name): (_, ServerName) = ServerName::deser(b)?;
-                b = b_new;
-                ret.push(name);
-            }
-
-            Ok(Self {
-                server_name_list: ret,
-            })
+        let mut server_name_list: Vec<ServerName> = Vec::new();
+        let mut index = 0;
+        while ctx.remaining() > 0 {
+            ctx.begin_element("server_name", "ServerName", index);
+            let name = ServerName::decode(ctx)?;
+            server_name_list.push(name);
+            ctx.end_element();
+            index += 1;
         }
+
+        ctx.end_vec()?;
+
+        Ok(Self { server_name_list })
     }
 
     pub fn ser(&self) -> Vec<u8> {
@@ -94,34 +89,35 @@ impl ServerName {
         }
     }
 
-    fn deser(b: &[u8]) -> Result<(&[u8], Self), AlertDescription> {
-        let (b, name_type): (_, u8) = parse::u8("ServerName.name_type", b)?;
+    fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        let name_type = ctx.u8("name_type", "NameType")?;
 
         if name_type != 0 {
-            log::error!("ServerName.name_type is not host_name");
-            return Err(AlertDescription::IllegalParameter)?;
+            log::error!("{} name_type is not host_name", ctx.current_path());
+            return Err(AlertDescription::IllegalParameter);
         }
 
-        let (remain, b): (_, &[u8]) = parse::vec16("ServerName.host_name", b, 1, 1)?;
+        let host_name_bytes = ctx.vec16("host_name", "HostName<1..2^16-1>", 1, 1)?;
 
-        let name: String = match String::from_utf8(b.to_vec()) {
+        let name: String = match String::from_utf8(host_name_bytes) {
             Ok(name) => name,
             Err(e) => {
                 // spec does not require host_name is UTF-8
-                log::error!("ServerName.host_name is not UTF-8: {e}");
-                return Err(AlertDescription::DecodeError)?;
+                log::error!("{} host_name is not UTF-8: {e}", ctx.current_path());
+                return Err(AlertDescription::DecodeError);
             }
         };
 
         if name.len() > Self::DNS_MAX_LEN {
             log::warn!(
-                "ServerName host_name is {} bytes, which is larger than {} bytes, the maximum for a valid DNS record",
+                "{} host_name is {} bytes, which is larger than {} bytes, the maximum for a valid DNS record",
+                ctx.current_path(),
                 name.len(),
                 Self::DNS_MAX_LEN
             );
         }
 
-        Ok((remain, Self { name }))
+        Ok(Self { name })
     }
 
     pub fn ser(&self) -> Vec<u8> {
@@ -139,7 +135,7 @@ impl ServerName {
 
 #[cfg(test)]
 mod tests {
-    use super::{ServerName, ServerNameList};
+    use super::{DecodeContext, ServerName, ServerNameList};
 
     const NAME: &str = "subdomain.example.com";
 
@@ -148,9 +144,10 @@ mod tests {
         let server_name: ServerName = ServerName::from_str(NAME).unwrap();
 
         let server_name_bytes: Vec<u8> = server_name.ser();
-        let (remain, result) = ServerName::deser(&server_name_bytes).unwrap();
+        let mut ctx = DecodeContext::new("ServerName", server_name_bytes);
+        let result = ServerName::decode(&mut ctx).unwrap();
 
-        assert!(remain.is_empty());
+        assert!(ctx.remaining() == 0);
         assert_eq!(result, server_name);
     }
 
@@ -162,7 +159,8 @@ mod tests {
         };
 
         let server_name_list_bytes: Vec<u8> = server_name_list.ser();
-        let result: ServerNameList = ServerNameList::deser(&server_name_list_bytes).unwrap();
+        let mut ctx = DecodeContext::new("ServerNameList", server_name_list_bytes);
+        let result = ServerNameList::decode(&mut ctx).unwrap();
 
         assert_eq!(result, server_name_list);
     }

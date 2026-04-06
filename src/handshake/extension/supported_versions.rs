@@ -1,4 +1,4 @@
-use crate::{alert::AlertDescription, parse, tls_version::TlsVersion};
+use crate::{alert::AlertDescription, decode::DecodeContext, tls_version::TlsVersion};
 
 /// # References
 ///
@@ -21,15 +21,16 @@ pub struct SupportedVersionsClientHello {
 }
 
 impl SupportedVersionsClientHello {
-    pub fn deser(b: &[u8]) -> Result<Self, AlertDescription> {
-        let (_, versions_b) = parse::vec8("SupportedVersions versions", b, 2, 2)?;
+    pub fn decode(ctx: &mut DecodeContext) -> Result<Self, AlertDescription> {
+        ctx.begin_vec8("versions", "ProtocolVersion<2..254>", 2, 2)?;
 
-        let mut versions: Vec<u16> = Vec::with_capacity(versions_b.len() / 2);
-        for chunk in versions_b.chunks_exact(2) {
-            // unwrap will never panic, data has been validated as a multiple of 2
-            let version: u16 = u16::from_be_bytes(chunk.try_into().unwrap());
+        let mut versions: Vec<u16> = Vec::new();
+        while ctx.remaining() > 0 {
+            let version = ctx.u16("version", "ProtocolVersion")?;
             versions.push(version);
         }
+
+        ctx.end_vec()?;
 
         Ok(Self { versions })
     }

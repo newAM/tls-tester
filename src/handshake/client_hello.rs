@@ -7,6 +7,7 @@ use sha2::{
 use crate::{
     Psk, SignatureScheme,
     crypto::hpke::{self, AeadId, KdfId},
+    decode::DecodeContext,
     handshake::{
         HandshakeHeader,
         ech::{ECHClientHello, ECHClientHelloOuter, ECHClientHelloType},
@@ -15,7 +16,6 @@ use crate::{
         },
     },
     key_schedule::KeySchedule,
-    parse,
     tls_version::TlsVersion,
 };
 
@@ -62,54 +62,56 @@ pub struct ClientHello {
 impl ClientHello {
     const LEGACY_SESSION_ID_LEN_IDX: usize = 34;
 
-    pub fn deser(b: &[u8], outer: Option<&ClientHello>) -> Result<Self, AlertDescription> {
-        let mut ech_aad: Vec<u8> = b.into();
-        let initial_len: usize = b.len();
+    pub fn decode(
+        ctx: &mut DecodeContext,
+        outer: Option<&ClientHello>,
+    ) -> Result<Self, AlertDescription> {
+        // Keep a copy of the original buffer for ECH AAD
+        // Note: original_buffer includes the handshake header (4 bytes), but ECH AAD
+        // should only include the ClientHello message body (without the header).
+        // We'll slice it after parsing to get the correct portion.
+        let full_buffer = ctx.original_buffer();
+        let mut ech_aad: Vec<u8> = full_buffer[HandshakeHeader::LEN..].to_vec();
 
-        let (b, legacy_version): (_, u16) = parse::u16("ClientHello.legacy_version", b)?;
-        let (b, random): (_, [u8; 32]) = parse::fixed::<32>("ClientHello.random", b)?;
+        let legacy_version = ctx.u16("legacy_version", "ProtocolVersion")?;
+        let random: [u8; 32] = ctx.fixed("random", "Random")?;
 
-        let (b, legacy_session_id): (_, &[u8]) =
-            parse::vec8("ClientHello.legacy_session_id", b, 0, 1)?;
-        let legacy_session_id: Vec<u8> = legacy_session_id.into();
+        let legacy_session_id: Vec<u8> = ctx.vec8("legacy_session_id", "opaque<0..32>", 0, 1)?;
+        if legacy_session_id.len() > 32 {
+            log::error!("{} length is greater than maximum of 32", ctx.prev_path());
+            return Err(AlertDescription::DecodeError);
+        }
 
-        let (b, cipher_suites_buf): (_, &[u8]) =
-            parse::vec16("ClientHello.cipher_suites", b, 2, 2)?;
-
-        let cipher_suites: Vec<Result<CipherSuite, u16>> = cipher_suites_buf
-            .chunks_exact(2)
-            .map(|chunk| {
-                CipherSuite::try_from(u16::from_be_bytes(
-                    TryInto::<[u8; 2]>::try_into(chunk).unwrap(),
-                ))
-            })
-            .collect();
+        // Track where cipher_suites start for ECH
+        ctx.begin_vec16("cipher_suites", "CipherSuite<2..2^16-2>", 2, 2)?;
+        let mut cipher_suites: Vec<Result<CipherSuite, u16>> = Vec::new();
+        while ctx.remaining() > 0 {
+            let cs_val = ctx.u16("cipher_suite", "CipherSuite")?;
+            cipher_suites.push(CipherSuite::try_from(cs_val));
+        }
+        ctx.end_vec()?;
 
         for unknown in cipher_suites.iter().filter_map(|cs| cs.err()) {
-            log::warn!("ClientHello.cipher_suites ignoring unknown value 0x{unknown:04X}");
+            log::warn!("cipher_suites ignoring unknown value 0x{unknown:04X}");
         }
 
-        let (b, legacy_compression_methods): (_, &[u8]) =
-            parse::vec8("ClientHello.legacy_compression_methods", b, 1, 1)?;
+        let legacy_compression_methods: Vec<u8> =
+            ctx.vec8("legacy_compression_methods", "uint8<1..2^8-1>", 1, 1)?;
 
-        let (_, b): (_, &[u8]) = parse::vec16("ClientHello.extensions", b, 8, 1)?;
+        ctx.begin_vec16("extensions", "Extension<8..2^16-1>", 8, 1)?;
+        let exts = ClientHelloExtensions::decode(ctx, outer)?;
+        ctx.end_vec()?;
 
-        let extensions_idx: usize = initial_len - b.len();
-        let (remain, exts): (_, ClientHelloExtensions) = ClientHelloExtensions::deser(b, outer)?;
-
-        if !remain.is_empty() {
-            log::error!(
-                "ClientHello.extensions contains {} bytes of extra data",
-                remain.len()
-            );
-            return Err(AlertDescription::DecodeError)?;
-        }
-
+        // Handle ECH AAD - zero out the payload if ECH is present
         if let Some((ech, start_ext_idx, end_ext_idx)) = &exts.encrypted_client_hello
             && let ECHClientHello::Outer(inner) = ech
         {
-            let start_ech_payload: usize = extensions_idx + start_ext_idx + inner.payload_offset();
-            let end_ech_payload: usize = extensions_idx + end_ext_idx;
+            // start_ext_idx and end_ext_idx are absolute positions in the full buffer
+            // (which includes the handshake header). ech_aad is the buffer WITHOUT the
+            // handshake header, so we need to adjust the indices.
+            let header_len = HandshakeHeader::LEN;
+            let start_ech_payload: usize = *start_ext_idx - header_len + inner.payload_offset();
+            let end_ech_payload: usize = *end_ext_idx - header_len;
             // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-5.2
             ech_aad[start_ech_payload..end_ech_payload].fill(0);
         }
@@ -119,7 +121,7 @@ impl ClientHello {
             random,
             legacy_session_id,
             cipher_suites,
-            legacy_compression_methods: legacy_compression_methods.to_vec(),
+            legacy_compression_methods,
             exts,
             ech_aad,
         })
