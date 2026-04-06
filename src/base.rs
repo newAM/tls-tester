@@ -15,7 +15,7 @@ use crate::{
     record::{ContentType, RecordHeader},
 };
 
-/// https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-7.2
+/// https://datatracker.ietf.org/doc/html/rfc8446#section-7.2
 /// https://datatracker.ietf.org/doc/html/rfc8446#section-7.1
 /// https://datatracker.ietf.org/doc/html/rfc5869#section-2.3
 ///

@@ -388,7 +388,7 @@ impl TlsServerStream {
                         client_hello_inner_random.replace(inner_client_hello.random);
 
                         // the transcript hash for ECH acceptance a munge of the inner and outer CH
-                        // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-5.1
+                        // https://datatracker.ietf.org/doc/html/rfc8446#section-5.1
 
                         let transcript_hash_ech_data =
                             client_hello.ech_transcript_data(&inner_client_hello);

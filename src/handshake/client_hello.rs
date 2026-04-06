@@ -112,7 +112,7 @@ impl ClientHello {
             let header_len = HandshakeHeader::LEN;
             let start_ech_payload: usize = *start_ext_idx - header_len + inner.payload_offset();
             let end_ech_payload: usize = *end_ext_idx - header_len;
-            // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-5.2
+            // https://datatracker.ietf.org/doc/html/rfc8446#section-5.2
             ech_aad[start_ech_payload..end_ech_payload].fill(0);
         }
 
@@ -537,7 +537,7 @@ impl ClientHelloBuilder {
                 data[extensions_length_idx..extensions_length_idx + 2]
                     .copy_from_slice(&extensions_len.to_be_bytes());
 
-                // https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-5.2
+                // https://datatracker.ietf.org/doc/html/rfc8446#section-5.2
                 let aad: &[u8] = &data[HandshakeHeader::LEN..];
                 let payload_and_tag: Vec<u8> = context.seal(aad, &ech_payload);
                 let data_len: usize = data.len();

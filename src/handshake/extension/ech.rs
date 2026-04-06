@@ -6,7 +6,7 @@ use crate::{AlertDescription, decode::DecodeContext};
 
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 5](https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-5)
+/// - [RFC 8446 Section 5](https://datatracker.ietf.org/doc/html/rfc8446#section-5)
 ///
 /// ```text
 /// enum { outer(0), inner(1) } ECHClientHelloType;
@@ -41,7 +41,7 @@ impl ECHClientHelloType {
 
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
+/// - [RFC 8446 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
 ///
 /// ```text
 /// struct {
@@ -91,7 +91,7 @@ impl HpkeSymmetricCipherSuite {
 
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
+/// - [RFC 8446 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
 ///
 /// ```text
 /// opaque HpkePublicKey<1..2^16-1>;
@@ -177,7 +177,7 @@ impl HpkeKeyConfig {
 
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
+/// - [RFC 8446 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
 ///
 /// ```text
 /// uint16 ECHConfigExtensionType; // Defined in Section 11.3
@@ -217,7 +217,7 @@ impl ECHConfigExtension {
 
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
+/// - [RFC 8446 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
 ///
 /// ```text
 /// uint16 ECHConfigExtensionType; // Defined in Section 11.3
@@ -302,7 +302,7 @@ impl ECHConfigContents {
 
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
+/// - [RFC 8446 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
 ///
 /// ```text
 /// struct {
@@ -423,7 +423,7 @@ impl From<ECHConfig> for ECHConfigList {
 ///
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
+/// - [RFC 8446 Section 4](https://datatracker.ietf.org/doc/draft-ietf-tls-esni/25/)
 ///
 /// ```text
 /// ECHConfig ECHConfigList<4..2^16-1>;
@@ -501,7 +501,7 @@ impl ECHConfigList {
 ///
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 5](https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-5)
+/// - [RFC 8446 Section 5](https://datatracker.ietf.org/doc/html/rfc8446#section-5)
 ///
 /// ```text
 /// struct {
@@ -621,7 +621,7 @@ impl ECHClientHelloOuter {
 ///
 /// # References
 ///
-/// - [draft-ietf-tls-esni-25 Section 5](https://datatracker.ietf.org/doc/html/draft-ietf-tls-esni-25#section-5)
+/// - [RFC 8446 Section 5](https://datatracker.ietf.org/doc/html/rfc8446#section-5)
 ///
 /// ```text
 /// ExtensionType OuterExtensions<2..254>;
