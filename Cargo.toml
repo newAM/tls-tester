@@ -33,7 +33,7 @@ p521 = { version = "=0.14.0-rc.8", features = [
   "ecdsa",
 ] }
 pem = "3.0.6"
-rand = "0.10.0"
+rand = "0.10.1"
 rsa = { version = "=0.10.0-rc.17", features = ["sha2"] }
 sha2 = "0.11.0"
 zeroize = { version = "1.8.2", default-features = false }
