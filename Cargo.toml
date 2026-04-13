@@ -40,7 +40,7 @@ zeroize = { version = "1.8.2", default-features = false }
 
 [dev-dependencies]
 stderrlog = "0.6"
-rustls = { version = "0.23.37", default-features = false, features = [
+rustls = { version = "0.23.38", default-features = false, features = [
   "std",
   "aws_lc_rs",
 ] }
