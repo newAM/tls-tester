@@ -20,7 +20,7 @@ p256 = { version = "=0.14.0-rc.8", features = [
   "ecdsa-core",
   "ecdsa",
 ] }
-p384 = { version = "=0.14.0-rc.8", features = [
+p384 = { version = "=0.14.0-rc.9", features = [
   "ecdh",
   "pem",
   "ecdsa-core",
