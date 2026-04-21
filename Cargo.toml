@@ -14,7 +14,7 @@ curve25519-dalek = "=5.0.0-pre.6"
 hkdf = "0.13.0"
 jiff = "0.2.23"
 log = "0.4.29"
-p256 = { version = "=0.14.0-rc.8", features = [
+p256 = { version = "=0.14.0-rc.9", features = [
   "ecdh",
   "pem",
   "ecdsa-core",
